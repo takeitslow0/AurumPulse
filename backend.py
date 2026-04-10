@@ -3353,4 +3353,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Port: {port}")
     socketio.run(app, debug=False, host='0.0.0.0', port=port,
-                 use_reloader=False, log_output=True)
+                 use_reloader=False, log_output=True,
+                 allow_unsafe_werkzeug=True)
