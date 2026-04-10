@@ -1418,44 +1418,42 @@
     };
 
     function handleLiveTick(price) {
-      const pStr = `$${price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
-      const pEl = document.getElementById('goldPrice');
-      pEl.textContent = pStr;
-      pEl.style.animation = 'none';
-      setTimeout(() => pEl.style.animation = 'flash 0.5s ease', 10);
+      try {
+        const pStr = `$${price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        const pEl = document.getElementById('goldPrice');
+        if (pEl) { pEl.textContent = pStr; pEl.style.animation = 'none'; setTimeout(() => pEl.style.animation = 'flash 0.5s ease', 10); }
 
-      document.getElementById('dashGoldPrice').textContent = pStr;
+        const dashP = document.getElementById('dashGoldPrice');
+        if (dashP) dashP.textContent = pStr;
 
-      if (liveCandles.length > 0) {
-        const lc = liveCandles[liveCandles.length - 1];
-        document.getElementById('goldHigh').textContent = lc.y[1].toFixed(2);
-        document.getElementById('goldLow').textContent = lc.y[2].toFixed(2);
-      }
-
-      if (isKillSwitchActive) {
-        document.getElementById('tsSignal').textContent = "STOP PATLADI";
-        document.getElementById('tsSignal').className = 'signal-main sell';
-      } else if (price > 2550 && !isKillSwitchActive) {
-        document.getElementById('tsSignal').textContent = "STOP PATLADI";
-        document.getElementById('tsSignal').className = 'signal-main buy';
-      }
+        if (liveCandles.length > 0) {
+          const lc = liveCandles[liveCandles.length - 1];
+          const hEl = document.getElementById('goldHigh');
+          const lEl = document.getElementById('goldLow');
+          if (hEl) hEl.textContent = lc.y[1].toFixed(2);
+          if (lEl) lEl.textContent = lc.y[2].toFixed(2);
+        }
+      } catch(e) { console.log('handleLiveTick error:', e); }
     }
 
     // Socket.IO
     try {
-      const socket = io();
-      socket.on('connect', () => {
-        console.log('WS connected');
-        document.getElementById('wsLabel').textContent = 'CANLI';
-        document.getElementById('wsDot').className = 'status-dot live';
-      });
-      socket.on('disconnect', () => {
-        console.log('WS disconnected');
-        document.getElementById('wsLabel').textContent = 'KESILDI';
-        document.getElementById('wsDot').className = 'status-dot dead';
-      });
+      if (typeof io !== 'undefined') {
+        const socket = io({ transports: ['polling', 'websocket'] });
+        socket.on('connect', () => {
+          console.log('WS connected');
+          const wl = document.getElementById('wsLabel'); if (wl) wl.textContent = 'CANLI';
+          const wd = document.getElementById('wsDot'); if (wd) wd.className = 'status-dot live';
+        });
+        socket.on('disconnect', () => {
+          console.log('WS disconnected');
+          const wl = document.getElementById('wsLabel'); if (wl) wl.textContent = 'KESILDI';
+          const wd = document.getElementById('wsDot'); if (wd) wd.className = 'status-dot dead';
+        });
+      }
     } catch (e) {
-      document.getElementById('wsLabel').textContent = 'REST';
+      console.log('Socket.IO init error:', e);
+      const wl = document.getElementById('wsLabel'); if (wl) wl.textContent = 'REST';
     }
 
     // ═══ DATA LOADING ═══
@@ -1502,61 +1500,57 @@
         const s = data.stats;
         const bal = s.balance || (100 + s.total_pnl);
         const ds = data.daily_safety || {};
+        // Null-safe helpers
+        const $s = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        const $h = (id, val) => { const el = document.getElementById(id); if (el) el.innerHTML = val; };
+        const $sc = (id, prop, val) => { const el = document.getElementById(id); if (el) el.style[prop] = val; };
 
         // PERFORMANS SEKMESİ
-        const perfBalEl = document.getElementById('perfBalance');
-        perfBalEl.textContent = '$' + bal.toFixed(2);
-        perfBalEl.style.color = bal >= 100 ? 'var(--gold)' : 'var(--red)';
-        const changeEl = document.getElementById('perfBalanceChange');
+        $s('perfBalance', '$' + bal.toFixed(2));
+        $sc('perfBalance', 'color', bal >= 100 ? 'var(--gold)' : 'var(--red)');
         const changePct = ((bal - 100) / 100 * 100).toFixed(1);
         const changeColor = s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-        changeEl.innerHTML = `Başlangıç: $100.00 &nbsp;|&nbsp; <span style="color:${changeColor};font-weight:600">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)} (${changePct}%)</span>`;
+        $h('perfBalanceChange', `Başlangıç: $100.00 &nbsp;|&nbsp; <span style="color:${changeColor};font-weight:600">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)} (${changePct}%)</span>`);
 
-        document.getElementById('perfTotal').textContent = s.total;
-        document.getElementById('perfWins').textContent = s.wins;
-        document.getElementById('perfLosses').textContent = s.losses;
-        document.getElementById('perfWinRate').textContent = s.win_rate.toFixed(1) + '%';
-        document.getElementById('perfWinRate').style.color = s.win_rate >= 50 ? 'var(--green)' : s.win_rate >= 35 ? 'var(--gold)' : 'var(--red)';
-        const perfPnlEl = document.getElementById('perfPnl');
-        perfPnlEl.textContent = (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(2);
-        perfPnlEl.style.color = s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+        $s('perfTotal', s.total);
+        $s('perfWins', s.wins);
+        $s('perfLosses', s.losses);
+        $s('perfWinRate', s.win_rate.toFixed(1) + '%');
+        $sc('perfWinRate', 'color', s.win_rate >= 50 ? 'var(--green)' : s.win_rate >= 35 ? 'var(--gold)' : 'var(--red)');
+        $s('perfPnl', (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(2));
+        $sc('perfPnl', 'color', s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)');
 
-        document.getElementById('perfAvgWin').textContent = '+$' + s.avg_win.toFixed(2);
-        document.getElementById('perfAvgLoss').textContent = '-$' + Math.abs(s.avg_loss).toFixed(2);
-        document.getElementById('perfBestWorst').innerHTML = `<span style="color:var(--green)">+$${s.best_trade.toFixed(2)}</span> / <span style="color:var(--red)">$${s.worst_trade.toFixed(2)}</span>`;
+        $s('perfAvgWin', '+$' + s.avg_win.toFixed(2));
+        $s('perfAvgLoss', '-$' + Math.abs(s.avg_loss).toFixed(2));
+        $h('perfBestWorst', `<span style="color:var(--green)">+$${s.best_trade.toFixed(2)}</span> / <span style="color:var(--red)">$${s.worst_trade.toFixed(2)}</span>`);
 
-        document.getElementById('perfTodayTrades').textContent = `${ds.trades_today || 0} / ${ds.max_trades || 20}`;
-        const todayPnlEl = document.getElementById('perfTodayPnl');
-        todayPnlEl.textContent = `${(ds.pnl_today || 0) >= 0 ? '+' : ''}$${(ds.pnl_today || 0).toFixed(2)}`;
-        todayPnlEl.style.color = (ds.pnl_today || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-        document.getElementById('perfStreak').textContent = `${ds.consecutive_losses || 0} / ${ds.max_consecutive || 3}`;
+        $s('perfTodayTrades', `${ds.trades_today || 0} / ${ds.max_trades || 20}`);
+        $s('perfTodayPnl', `${(ds.pnl_today || 0) >= 0 ? '+' : ''}$${(ds.pnl_today || 0).toFixed(2)}`);
+        $sc('perfTodayPnl', 'color', (ds.pnl_today || 0) >= 0 ? 'var(--green)' : 'var(--red)');
+        $s('perfStreak', `${ds.consecutive_losses || 0} / ${ds.max_consecutive || 999}`);
         const safetyEl = document.getElementById('perfSafety');
-        safetyEl.textContent = ds.can_trade !== false ? 'AKTİF' : 'DURDURULDU';
-        safetyEl.style.color = ds.can_trade !== false ? 'var(--green)' : 'var(--red)';
+        if (safetyEl) { safetyEl.textContent = ds.can_trade !== false ? 'AKTİF' : 'DURDURULDU'; safetyEl.style.color = ds.can_trade !== false ? 'var(--green)' : 'var(--red)'; }
 
-        document.getElementById('perfEquityLabel').textContent = '$' + bal.toFixed(2);
-        document.getElementById('perfTradeCount').textContent = s.total + ' işlem';
+        $s('perfEquityLabel', '$' + bal.toFixed(2));
+        $s('perfTradeCount', s.total + ' işlem');
 
         // SİMÜLASYON PANELİ (SINYALLER)
-        document.getElementById('statTotal').textContent = s.total;
-        document.getElementById('statWins').textContent = s.wins;
-        document.getElementById('statLosses').textContent = s.losses;
-        document.getElementById('statWinRate').textContent = s.win_rate.toFixed(1) + '%';
-        const simPnlEl = document.getElementById('statPnl');
-        simPnlEl.textContent = (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(2);
-        simPnlEl.style.color = s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-        const simBalEl = document.getElementById('statBalance');
-        simBalEl.textContent = '$' + bal.toFixed(2);
-        simBalEl.style.color = bal >= 100 ? 'var(--gold)' : 'var(--red)';
-        const hPnl = document.getElementById('tradePnl');
-        hPnl.textContent = (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(2);
-        hPnl.style.color = s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+        $s('statTotal', s.total);
+        $s('statWins', s.wins);
+        $s('statLosses', s.losses);
+        $s('statWinRate', s.win_rate.toFixed(1) + '%');
+        $s('statPnl', (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(2));
+        $sc('statPnl', 'color', s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)');
+        $s('statBalance', '$' + bal.toFixed(2));
+        $sc('statBalance', 'color', bal >= 100 ? 'var(--gold)' : 'var(--red)');
+        $s('tradePnl', (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(2));
+        $sc('tradePnl', 'color', s.total_pnl >= 0 ? 'var(--green)' : 'var(--red)');
         const badge = document.getElementById('tradeStatus');
-        if (s.total === 0) {
+        if (badge && s.total === 0) {
           badge.textContent = 'SİNYAL BEKLENİYOR';
           badge.style.background = 'rgba(212,168,67,0.12)';
           badge.style.color = 'var(--gold)';
-        } else {
+        } else if (badge) {
           const wp = s.win_rate;
           badge.textContent = wp >= 50 ? 'KAZANÇLI' : wp >= 35 ? 'NORMAL' : 'KAYIPLI';
           badge.style.background = wp >= 50 ? 'rgba(0,214,143,0.15)' : wp >= 35 ? 'rgba(212,168,67,0.12)' : 'rgba(255,90,90,0.15)';
@@ -1565,7 +1559,8 @@
 
         // TRADE TABLOSU (Performans)
         const tbody = document.getElementById('tradeHistoryBody');
-        if (!data.trades || data.trades.length === 0) {
+        if (!tbody) { /* element missing, skip */ }
+        else if (!data.trades || data.trades.length === 0) {
           tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--text-3);padding:30px">
             <div style="font-size:20px;margin-bottom:8px">⏳</div>
             Simülasyon aktif — sinyal bekleniyor.
@@ -1695,100 +1690,110 @@
     }
 
     function updateDashboard(data) {
+      // Null-safe helper
+      const $set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+      const $html = (id, val) => { const el = document.getElementById(id); if (el) el.innerHTML = val; };
+      const $style = (id, prop, val) => { const el = document.getElementById(id); if (el) el.style[prop] = val; };
+      const $class = (id, cls) => { const el = document.getElementById(id); if (el) el.className = cls; };
+
       if (data.candles) liveCandles = data.candles;
 
-      document.getElementById('goldOpen').textContent = data.gold_open;
-      document.getElementById('dxyPrice').textContent = data.dxy_price;
-      document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('tr-TR');
+      try {
+        $set('goldOpen', data.gold_open);
+        $set('dxyPrice', data.dxy_price);
+        $set('lastUpdate', new Date().toLocaleTimeString('tr-TR'));
 
-      if (data.vwap !== undefined) {
-        document.getElementById('vwapVal').textContent = '$' + data.vwap.toFixed(2);
-        document.getElementById('volVal').textContent = data.volume.toLocaleString('tr-TR');
-        const sm = document.getElementById('smartMoney');
-        if (data.gold_price > data.vwap) { sm.textContent = 'Alis Bolgesi'; sm.className = 'v up'; }
-        else { sm.textContent = 'Satis Bolgesi'; sm.className = 'v down'; }
-      }
-
-      document.getElementById('rsiValue').textContent = data.gold_rsi;
-      document.getElementById('rsiSideVal').textContent = data.gold_rsi;
-      document.getElementById('rsiSideSig').textContent = data.rsi_signal || '';
-      document.getElementById('rsiNeedle').style.left = Math.min(Math.max(data.gold_rsi, 0), 100) + '%';
-
-      if (data.macd) {
-        document.getElementById('macdValue').textContent = data.macd.macd;
-        document.getElementById('macdLine').textContent = data.macd.macd;
-        document.getElementById('macdSignal').textContent = data.macd.signal;
-        const mt = document.getElementById('macdTrend');
-        mt.textContent = data.macd.trend === 'bullish' ? 'Yukari' : 'Asagi';
-        mt.className = 'v ' + (data.macd.trend === 'bullish' ? 'up' : 'down');
-      }
-
-      const sigEl = document.getElementById('tsSignal');
-      if (data.kill_switch && data.kill_switch.active) {
-        isKillSwitchActive = true;
-        activeTrend = "kilitli";
-        sigEl.textContent = "KILITLI";
-        sigEl.className = 'signal-main neutral';
-        document.getElementById('tsSignalSub').textContent = data.kill_switch.message;
-      } else {
-        isKillSwitchActive = false;
-        if (data.trading_signals) {
-          const ts = data.trading_signals;
-          activeTrend = ts.trend;
-          sigEl.textContent = ts.trend === 'bullish' ? 'YUKSELIS' : 'DUSUS';
-          sigEl.className = 'signal-main ' + (ts.trend === 'bullish' ? 'buy' : 'sell');
-          document.getElementById('tsSignalSub').textContent = ts.signal || '';
-          document.getElementById('tsAtr').textContent = ts.atr;
-          document.getElementById('tsEntry').textContent = ts.entry > 0 ? `$${ts.entry.toFixed(2)}` : '--';
-          document.getElementById('tsSl').textContent = ts.sl > 0 ? `$${ts.sl.toFixed(2)}` : '--';
-          document.getElementById('tsTp1').textContent = ts.tp1 > 0 ? `$${ts.tp1.toFixed(2)}` : '--';
-          document.getElementById('tsTp2').textContent = ts.tp2 > 0 ? `$${ts.tp2.toFixed(2)}` : '--';
-
-          const qEl = document.getElementById('tsQuality');
-          if (qEl && ts.quality_score) {
-            const qs = ts.quality_score;
-            const qColor = qs >= 7.5 ? 'var(--green)' : qs >= 5 ? 'var(--gold)' : 'var(--red)';
-            qEl.innerHTML = `<b style="color:${qColor}">${qs.toFixed(1)}/10</b> - ${ts.quality_reasons.join(', ')}`;
-          }
-
-          if (ts.analysis && ts.analysis.sl_source) {
-            document.getElementById('tsSlSource').textContent = `${ts.analysis.sl_source} | $${ts.analysis.sl_distance}`;
-          }
-
-          if (ts.risk) {
-            const r = ts.risk;
-            document.getElementById('riskLot').textContent = r.lot_size.toFixed(2);
-            document.getElementById('riskUsd').textContent = `$${r.risk_usd.toFixed(2)}`;
-            document.getElementById('riskPct').textContent = `%${r.risk_pct.toFixed(1)}`;
-            document.getElementById('riskRR').textContent = `1:${r.rr_tp1} / 1:${r.rr_tp2}`;
-            document.getElementById('tsTp1Profit').textContent = `+$${r.tp1_profit.toFixed(2)}`;
-            document.getElementById('tsTp2Profit').textContent = `+$${r.tp2_profit.toFixed(2)}`;
-            document.getElementById('riskPct').style.color = r.risk_pct > 3 ? 'var(--red)' : r.risk_pct > 2 ? 'var(--gold)' : 'var(--green)';
-            document.getElementById('riskUsd').style.color = r.risk_pct > 3 ? 'var(--red)' : r.risk_pct > 2 ? 'var(--gold)' : 'var(--green)';
-
-            const warnEl = document.getElementById('riskWarning');
-            if (warnEl && r.risk_pct > 3) {
-              warnEl.style.display = 'block';
-              warnEl.textContent = '⚠️ Risk çok yüksek!';
-            } else if (warnEl) {
-              warnEl.style.display = 'none';
-            }
-          }
-
-          if (ts.analysis) {
-            document.getElementById('analysisHtf').textContent = ts.analysis.htf || '--';
-            document.getElementById('analysisStructure').textContent = ts.analysis.structure || '--';
-            document.getElementById('analysisSqueeze').textContent = ts.analysis.squeeze || '--';
+        if (data.vwap !== undefined) {
+          $set('vwapVal', '$' + data.vwap.toFixed(2));
+          $set('volVal', data.volume.toLocaleString('tr-TR'));
+          const sm = document.getElementById('smartMoney');
+          if (sm) {
+            if (data.gold_price > data.vwap) { sm.textContent = 'Alis Bolgesi'; sm.className = 'v up'; }
+            else { sm.textContent = 'Satis Bolgesi'; sm.className = 'v down'; }
           }
         }
-      }
+
+        $set('rsiValue', data.gold_rsi);
+        $set('rsiSideVal', data.gold_rsi);
+        $set('rsiSideSig', data.rsi_signal || '');
+        $style('rsiNeedle', 'left', Math.min(Math.max(data.gold_rsi, 0), 100) + '%');
+
+        if (data.macd) {
+          $set('macdValue', data.macd.macd);
+          $set('macdLine', data.macd.macd);
+          $set('macdSignal', data.macd.signal);
+          const mt = document.getElementById('macdTrend');
+          if (mt) {
+            mt.textContent = data.macd.trend === 'bullish' ? 'Yukari' : 'Asagi';
+            mt.className = 'v ' + (data.macd.trend === 'bullish' ? 'up' : 'down');
+          }
+        }
+
+        const sigEl = document.getElementById('tsSignal');
+        if (data.kill_switch && data.kill_switch.active) {
+          isKillSwitchActive = true;
+          activeTrend = "kilitli";
+          if (sigEl) { sigEl.textContent = "KILITLI"; sigEl.className = 'signal-main neutral'; }
+          $set('tsSignalSub', data.kill_switch.message);
+        } else {
+          isKillSwitchActive = false;
+          if (data.trading_signals) {
+            const ts = data.trading_signals;
+            activeTrend = ts.trend;
+            if (sigEl) {
+              sigEl.textContent = ts.trend === 'bullish' ? 'YUKSELIS' : ts.trend === 'bearish' ? 'DUSUS' : 'NOTR';
+              sigEl.className = 'signal-main ' + (ts.trend === 'bullish' ? 'buy' : ts.trend === 'bearish' ? 'sell' : 'neutral');
+            }
+            $set('tsSignalSub', ts.signal || '');
+            $set('tsAtr', ts.atr);
+            $set('tsEntry', ts.entry > 0 ? `$${ts.entry.toFixed(2)}` : '--');
+            $set('tsSl', ts.sl > 0 ? `$${ts.sl.toFixed(2)}` : '--');
+            $set('tsTp1', ts.tp1 > 0 ? `$${ts.tp1.toFixed(2)}` : '--');
+            $set('tsTp2', ts.tp2 > 0 ? `$${ts.tp2.toFixed(2)}` : '--');
+
+            const qEl = document.getElementById('tsQuality');
+            if (qEl && ts.quality_score) {
+              const qs = ts.quality_score;
+              const qColor = qs >= 7.5 ? 'var(--green)' : qs >= 5 ? 'var(--gold)' : 'var(--red)';
+              qEl.innerHTML = `<b style="color:${qColor}">${qs.toFixed(1)}/10</b> - ${(ts.quality_reasons||[]).join(', ')}`;
+            }
+
+            if (ts.analysis && ts.analysis.sl_source) {
+              $set('tsSlSource', `${ts.analysis.sl_source} | $${ts.analysis.sl_distance}`);
+            }
+
+            if (ts.risk) {
+              const r = ts.risk;
+              $set('riskLot', r.lot_size.toFixed(2));
+              $set('riskUsd', `$${r.risk_usd.toFixed(2)}`);
+              $set('riskPct', `%${r.risk_pct.toFixed(1)}`);
+              $set('riskRR', `1:${r.rr_tp1} / 1:${r.rr_tp2}`);
+              $set('tsTp1Profit', `+$${r.tp1_profit.toFixed(2)}`);
+              $set('tsTp2Profit', `+$${r.tp2_profit.toFixed(2)}`);
+              $style('riskPct', 'color', r.risk_pct > 3 ? 'var(--red)' : r.risk_pct > 2 ? 'var(--gold)' : 'var(--green)');
+              $style('riskUsd', 'color', r.risk_pct > 3 ? 'var(--red)' : r.risk_pct > 2 ? 'var(--gold)' : 'var(--green)');
+
+              const warnEl = document.getElementById('riskWarning');
+              if (warnEl) {
+                warnEl.style.display = r.risk_pct > 3 ? 'block' : 'none';
+                if (r.risk_pct > 3) warnEl.textContent = '⚠️ Risk çok yüksek!';
+              }
+            }
+
+            if (ts.analysis) {
+              $set('analysisHtf', ts.analysis.htf || '--');
+              $set('analysisStructure', ts.analysis.structure || '--');
+              $set('analysisSqueeze', ts.analysis.squeeze || '--');
+            }
+          }
+        }
 
       // Active positions
       if (data.active_positions && data.active_positions.length > 0) {
         const apBar = document.getElementById('activePositionBar');
-        apBar.style.display = 'block';
+        if (apBar) apBar.style.display = 'block';
         const listEl = document.getElementById('activePositionsList');
-        listEl.innerHTML = data.active_positions.map((pos, i) => {
+        if (listEl) listEl.innerHTML = data.active_positions.map((pos, i) => {
           const isBull = pos.trend === 'bullish';
           const dirText = isBull ? 'LONG' : 'SHORT';
           const dirColor = isBull ? 'var(--green)' : 'var(--red)';
@@ -1810,7 +1815,8 @@
           </div>`;
         }).join('');
       } else {
-        document.getElementById('activePositionBar').style.display = 'none';
+        const apBar = document.getElementById('activePositionBar');
+        if (apBar) apBar.style.display = 'none';
       }
 
       // Candle chart
@@ -1832,6 +1838,8 @@
       // RSI chart
       if (data.rsi_series && data.rsi_series.length > 0) renderRsiChart(data.rsi_series);
       if (isFirstLoad) { loadHistory(); isFirstLoad = false; }
+
+      } catch(e) { console.error('updateDashboard error:', e); }
     }
 
     function renderRsiChart(rsiSeries) {
