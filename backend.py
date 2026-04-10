@@ -25,6 +25,10 @@ def serve_index():
     from flask import send_from_directory
     return send_from_directory(_BASE_DIR, 'index.html')
 
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "ok"}), 200
+
 # ─────────────────────────────────────────
 # TELEGRAM BOT AYARLARI
 # ─────────────────────────────────────────
