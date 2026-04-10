@@ -29,6 +29,34 @@ def serve_index():
 def health_check():
     return jsonify({"status": "ok"}), 200
 
+@app.route('/api/reset_balance', methods=['POST'])
+def reset_balance():
+    """Simülasyon bakiyesini sıfırla — $100'e geri dön"""
+    global _active_positions, _trade_history
+    # Açık pozisyonları kapat
+    _active_positions = []
+    # Trade geçmişini temizle
+    _trade_history = []
+    # DB'den de sil
+    try:
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(_BASE_DIR, 'aurumpulse.db'))
+        conn.execute('DELETE FROM trade_history')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ DB temizleme hatası: {e}")
+    # Bakiyeyi resetle
+    ACCOUNT_CONFIG['balance'] = 100.0
+    # Günlük istatistikleri sıfırla
+    _daily_state['trades_today'] = 0
+    _daily_state['pnl_today'] = 0
+    _daily_state['consecutive_losses'] = 0
+    _daily_state['paused_until'] = 0
+    _daily_state['pause_reason'] = ''
+    print("🔄 Simülasyon sıfırlandı — Bakiye: $100.00")
+    return jsonify({"status": "ok", "balance": 100.0, "message": "Simülasyon sıfırlandı"})
+
 # ─────────────────────────────────────────
 # TELEGRAM BOT AYARLARI
 # ─────────────────────────────────────────
@@ -230,11 +258,9 @@ HTF_TTL  = 300   # 15dk cache 5 dakika — yavaş değişir
 # ─────────────────────────────────────────
 # AKTİF POZİSYON TAKİBİ
 # ─────────────────────────────────────────
-_active_position = {
-    'active': False, 'trend': 'nötr', 'signal': '',
-    'entry': 0, 'sl': 0, 'tp1': 0, 'tp2': 0, 'tp1_hit': False,
-    'open_time': 0
-}
+# Multiple simultaneous positions (max 3)
+MAX_SIMULTANEOUS = 3
+_active_positions = []  # List of active position dicts
 
 _trade_history = []  # İşlem geçmişi — startup'ta DB'den yüklenir
 
@@ -260,8 +286,8 @@ def _init_trade_history():
 DAILY_SAFETY = {
     'max_trades_per_day': 20,       # v5.7: 5 → 20 (pattern strategy trades more frequently)
     'max_daily_loss_pct': 6.0,      # Günlük max kayıp %6 ($100'da $6)
-    'max_consecutive_losses': 3,    # Art arda 3 kayıpta duraklat
-    'cooldown_after_streak_min': 60, # Kayıp serisi sonrası 60dk bekleme
+    'max_consecutive_losses': 999,  # Devre kesici devre dışı — sürekli trade
+    'cooldown_after_streak_min': 0,  # Bekleme yok
 }
 
 _daily_state = {
@@ -289,6 +315,10 @@ def _can_open_trade():
     """Trade açılabilir mi kontrol et — tüm güvenlik katmanları"""
     _check_daily_reset()
     now = int(time.time())
+
+    # 0) Bakiye koruması — $0 veya altıysa trade açma
+    if ACCOUNT_CONFIG['balance'] <= 0:
+        return False, "🚫 BAKİYE SIFIR — Simülasyon durduruldu. Bakiye: $0.00"
 
     # 1) Duraklama süresi devam ediyor mu?
     if _daily_state['paused_until'] > now:
@@ -2436,138 +2466,129 @@ def build_response_payload(interval='1min'):
         analysis = {}
         quality_score = 0
         quality_reasons = []
-        global _active_position
+        global _active_positions
 
         if kill_switch_status.get('active', False):
-            _active_position = _reset_position()
+            # Close ALL active positions
+            for pos in _active_positions:
+                lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
+                pnl_close = 0
+                if pos['trend'] == 'bullish':
+                    pnl_close = (current_price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
+                else:
+                    pnl_close = (pos['entry'] - current_price) * lot_sz * ACCOUNT_CONFIG['contract_size']
+                send_telegram_close("KILL SWITCH", pos['entry'], current_price, pnl_close)
+                _record_trade(pos, current_price, "KILL_SWITCH", pnl_close)
+            _active_positions = []
             trend = "kilitli"
             sig_type = kill_switch_status.get('message', 'KİLİTLİ')
 
-        elif _active_position['active']:
-            # ── AKTİF POZİSYON KONTROLÜ ──
-            pos = _active_position
-            closed = False
+        elif _active_positions:
+            # ── AKTİF POZİSYONLAR KONTROLÜ — iterate in reverse to safely remove ──
+            closed_any = False
 
-            if pos['trend'] == 'bullish':
-                lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
-                if current_price <= pos['sl']:
-                    sig_type = "🛑 STOP-LOSS VURULDU — Pozisyon Kapatıldı"
-                    pnl_close = (current_price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
-                    send_telegram_close("STOP-LOSS", pos['entry'], current_price, pnl_close)
-                    _record_trade(pos, current_price, "STOP-LOSS", pnl_close)
-                    _active_position = _reset_position()
-                    closed = True
-                elif current_price >= pos['tp2']:
-                    sig_type = "🏆 TP2 VURULDU — Maksimum Kâr Alındı!"
-                    pnl_close = (current_price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
-                    send_telegram_close("TP2 VURULDU", pos['entry'], current_price, pnl_close)
-                    _record_trade(pos, current_price, "TP2", pnl_close)
-                    _active_position = _reset_position()
-                    closed = True
-                elif current_price >= pos['tp1'] and not pos['tp1_hit']:
-                    _active_position['tp1_hit'] = True
-                    # v3.8: Trail lock %30 — TP1 mesafesinin %30'unu kilitle
-                    tp1_dist = pos['tp1'] - pos['entry']
-                    trail_lock_sl = pos['entry'] + tp1_dist * 0.30
-                    _active_position['sl'] = round(trail_lock_sl, 2)
-                    trend = "bullish"
-                    pnl = current_price - pos['entry']
-                    sig_type = f"✅ TP1 ALINDI — Trail SL ${trail_lock_sl:.2f} (+${pnl:.2f}) 🟢"
-                    sl, tp1, tp2 = round(trail_lock_sl, 2), pos['tp1'], pos['tp2']
-                else:
-                    # v3.7 — BREAKEVEN KALDIRILDI (v3.3'te avg win $6.92→$3.19, R:R 1.52→0.80)
+            for idx in range(len(_active_positions) - 1, -1, -1):
+                pos = _active_positions[idx]
+                pos_closed = False
 
-                    # v3.2 — AKILLI ERKEN ÇIKIŞ (LONG)
-                    # Koşullar: (1) min 10dk geçmiş, (2) min 0.5 ATR zararda,
-                    #           (3) MACD histogram 3 mum art arda negatif
-                    early_exit = False
-                    if not pos.get('tp1_hit', False):
-                        time_in_trade = int(time.time()) - pos.get('open_time', int(time.time()))
-                        unrealized_loss = pos['entry'] - current_price
-                        if time_in_trade >= 600 and unrealized_loss >= 0.5 * atr_val:
-                            if len(gold_df) >= 3 and 'MACD_Hist' in gold_df.columns:
-                                h1 = safe_float(gold_df['MACD_Hist'].iloc[-1], 0)
-                                h2 = safe_float(gold_df['MACD_Hist'].iloc[-2], 0)
-                                h3 = safe_float(gold_df['MACD_Hist'].iloc[-3], 0)
-                                if h1 < 0 and h2 < 0 and h3 < 0:
-                                    early_exit = True
-                    if early_exit:
-                        lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
+                if pos['trend'] == 'bullish':
+                    lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
+                    if current_price <= pos['sl']:
+                        sig_type = "🛑 STOP-LOSS VURULDU — Pozisyon Kapatıldı"
                         pnl_close = (current_price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
-                        sig_type = "⚡ ERKEN ÇIKIŞ — Momentum tersine döndü"
-                        send_telegram_close("ERKEN ÇIKIŞ", pos['entry'], current_price, pnl_close)
-                        _record_trade(pos, current_price, "EARLY_EXIT", pnl_close)
-                        _active_position = _reset_position()
-                        closed = True
-                        print(f"   ⚡ EARLY EXIT LONG: {time_in_trade}sn, loss=${unrealized_loss:.2f}, PnL=${pnl_close:.2f}")
+                        send_telegram_close("STOP-LOSS", pos['entry'], current_price, pnl_close)
+                        _record_trade(pos, current_price, "STOP-LOSS", pnl_close)
+                        _active_positions.pop(idx)
+                        pos_closed = True
+                        closed_any = True
+                    elif current_price >= pos['tp2']:
+                        sig_type = "🏆 TP2 VURULDU — Maksimum Kâr Alındı!"
+                        pnl_close = (current_price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
+                        send_telegram_close("TP2 VURULDU", pos['entry'], current_price, pnl_close)
+                        _record_trade(pos, current_price, "TP2", pnl_close)
+                        _active_positions.pop(idx)
+                        pos_closed = True
+                        closed_any = True
+                    elif current_price >= pos['tp1'] and not pos['tp1_hit']:
+                        _active_positions[idx]['tp1_hit'] = True
+                        # v3.8: Trail lock %30 — TP1 mesafesinin %30'unu kilitle
+                        tp1_dist = pos['tp1'] - pos['entry']
+                        trail_lock_sl = pos['entry'] + tp1_dist * 0.30
+                        _active_positions[idx]['sl'] = round(trail_lock_sl, 2)
                     else:
-                        trend = "bullish"
-                        pnl = current_price - pos['entry']
-                        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-                        sig_type = f"SCALP LONG AKTİF ({pnl_str}) 🟢"
-                        sl, tp1, tp2 = pos['sl'], pos['tp1'], pos['tp2']
+                        # v3.2 — AKILLI ERKEN ÇIKIŞ (LONG)
+                        early_exit = False
+                        if not pos.get('tp1_hit', False):
+                            time_in_trade = int(time.time()) - pos.get('open_time', int(time.time()))
+                            unrealized_loss = pos['entry'] - current_price
+                            if time_in_trade >= 600 and unrealized_loss >= 0.5 * atr_val:
+                                if len(gold_df) >= 3 and 'MACD_Hist' in gold_df.columns:
+                                    h1 = safe_float(gold_df['MACD_Hist'].iloc[-1], 0)
+                                    h2 = safe_float(gold_df['MACD_Hist'].iloc[-2], 0)
+                                    h3 = safe_float(gold_df['MACD_Hist'].iloc[-3], 0)
+                                    if h1 < 0 and h2 < 0 and h3 < 0:
+                                        early_exit = True
+                        if early_exit:
+                            lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
+                            pnl_close = (current_price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
+                            sig_type = "⚡ ERKEN ÇIKIŞ — Momentum tersine döndü"
+                            send_telegram_close("ERKEN ÇIKIŞ", pos['entry'], current_price, pnl_close)
+                            _record_trade(pos, current_price, "EARLY_EXIT", pnl_close)
+                            _active_positions.pop(idx)
+                            pos_closed = True
+                            closed_any = True
+                            print(f"   ⚡ EARLY EXIT LONG: {time_in_trade}sn, loss=${unrealized_loss:.2f}, PnL=${pnl_close:.2f}")
 
-            elif pos['trend'] == 'bearish':
-                lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
-                if current_price >= pos['sl']:
-                    sig_type = "🛑 STOP-LOSS VURULDU — Pozisyon Kapatıldı"
-                    pnl_close = (pos['entry'] - current_price) * lot_sz * ACCOUNT_CONFIG['contract_size']
-                    send_telegram_close("STOP-LOSS", pos['entry'], current_price, pnl_close)
-                    _record_trade(pos, current_price, "STOP-LOSS", pnl_close)
-                    _active_position = _reset_position()
-                    closed = True
-                elif current_price <= pos['tp2']:
-                    sig_type = "🏆 TP2 VURULDU — Maksimum Kâr Alındı!"
-                    pnl_close = (pos['entry'] - current_price) * lot_sz * ACCOUNT_CONFIG['contract_size']
-                    send_telegram_close("TP2 VURULDU", pos['entry'], current_price, pnl_close)
-                    _record_trade(pos, current_price, "TP2", pnl_close)
-                    _active_position = _reset_position()
-                    closed = True
-                elif current_price <= pos['tp1'] and not pos['tp1_hit']:
-                    _active_position['tp1_hit'] = True
-                    # v3.8: Trail lock %30 — TP1 mesafesinin %30'unu kilitle
-                    tp1_dist = pos['entry'] - pos['tp1']
-                    trail_lock_sl = pos['entry'] - tp1_dist * 0.30
-                    _active_position['sl'] = round(trail_lock_sl, 2)
-                    trend = "bearish"
-                    pnl = pos['entry'] - current_price
-                    sig_type = f"✅ TP1 ALINDI — Trail SL ${trail_lock_sl:.2f} (+${pnl:.2f}) 🔴"
-                    sl, tp1, tp2 = round(trail_lock_sl, 2), pos['tp1'], pos['tp2']
-                else:
-                    # v3.7 — BREAKEVEN KALDIRILDI (SHORT tarafı da)
-
-                    # v3.2 — AKILLI ERKEN ÇIKIŞ (SHORT)
-                    early_exit = False
-                    if not pos.get('tp1_hit', False):
-                        time_in_trade = int(time.time()) - pos.get('open_time', int(time.time()))
-                        unrealized_loss = current_price - pos['entry']
-                        if time_in_trade >= 600 and unrealized_loss >= 0.5 * atr_val:
-                            if len(gold_df) >= 3 and 'MACD_Hist' in gold_df.columns:
-                                h1 = safe_float(gold_df['MACD_Hist'].iloc[-1], 0)
-                                h2 = safe_float(gold_df['MACD_Hist'].iloc[-2], 0)
-                                h3 = safe_float(gold_df['MACD_Hist'].iloc[-3], 0)
-                                if h1 > 0 and h2 > 0 and h3 > 0:
-                                    early_exit = True
-                    if early_exit:
-                        lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
+                elif pos['trend'] == 'bearish':
+                    lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
+                    if current_price >= pos['sl']:
+                        sig_type = "🛑 STOP-LOSS VURULDU — Pozisyon Kapatıldı"
                         pnl_close = (pos['entry'] - current_price) * lot_sz * ACCOUNT_CONFIG['contract_size']
-                        sig_type = "⚡ ERKEN ÇIKIŞ — Momentum tersine döndü"
-                        send_telegram_close("ERKEN ÇIKIŞ", pos['entry'], current_price, pnl_close)
-                        _record_trade(pos, current_price, "EARLY_EXIT", pnl_close)
-                        _active_position = _reset_position()
-                        closed = True
-                        print(f"   ⚡ EARLY EXIT SHORT: {time_in_trade}sn, loss=${unrealized_loss:.2f}, PnL=${pnl_close:.2f}")
+                        send_telegram_close("STOP-LOSS", pos['entry'], current_price, pnl_close)
+                        _record_trade(pos, current_price, "STOP-LOSS", pnl_close)
+                        _active_positions.pop(idx)
+                        pos_closed = True
+                        closed_any = True
+                    elif current_price <= pos['tp2']:
+                        sig_type = "🏆 TP2 VURULDU — Maksimum Kâr Alındı!"
+                        pnl_close = (pos['entry'] - current_price) * lot_sz * ACCOUNT_CONFIG['contract_size']
+                        send_telegram_close("TP2 VURULDU", pos['entry'], current_price, pnl_close)
+                        _record_trade(pos, current_price, "TP2", pnl_close)
+                        _active_positions.pop(idx)
+                        pos_closed = True
+                        closed_any = True
+                    elif current_price <= pos['tp1'] and not pos['tp1_hit']:
+                        _active_positions[idx]['tp1_hit'] = True
+                        # v3.8: Trail lock %30 — TP1 mesafesinin %30'unu kilitle
+                        tp1_dist = pos['entry'] - pos['tp1']
+                        trail_lock_sl = pos['entry'] - tp1_dist * 0.30
+                        _active_positions[idx]['sl'] = round(trail_lock_sl, 2)
                     else:
-                        trend = "bearish"
-                        pnl = pos['entry'] - current_price
-                        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-                        sig_type = f"SCALP SHORT AKTİF ({pnl_str}) 🔴"
-                        sl, tp1, tp2 = pos['sl'], pos['tp1'], pos['tp2']
+                        # v3.2 — AKILLI ERKEN ÇIKIŞ (SHORT)
+                        early_exit = False
+                        if not pos.get('tp1_hit', False):
+                            time_in_trade = int(time.time()) - pos.get('open_time', int(time.time()))
+                            unrealized_loss = current_price - pos['entry']
+                            if time_in_trade >= 600 and unrealized_loss >= 0.5 * atr_val:
+                                if len(gold_df) >= 3 and 'MACD_Hist' in gold_df.columns:
+                                    h1 = safe_float(gold_df['MACD_Hist'].iloc[-1], 0)
+                                    h2 = safe_float(gold_df['MACD_Hist'].iloc[-2], 0)
+                                    h3 = safe_float(gold_df['MACD_Hist'].iloc[-3], 0)
+                                    if h1 > 0 and h2 > 0 and h3 > 0:
+                                        early_exit = True
+                        if early_exit:
+                            lot_sz = pos.get('lot', ACCOUNT_CONFIG['min_lot'])
+                            pnl_close = (pos['entry'] - current_price) * lot_sz * ACCOUNT_CONFIG['contract_size']
+                            sig_type = "⚡ ERKEN ÇIKIŞ — Momentum tersine döndü"
+                            send_telegram_close("ERKEN ÇIKIŞ", pos['entry'], current_price, pnl_close)
+                            _record_trade(pos, current_price, "EARLY_EXIT", pnl_close)
+                            _active_positions.pop(idx)
+                            pos_closed = True
+                            closed_any = True
+                            print(f"   ⚡ EARLY EXIT SHORT: {time_in_trade}sn, loss=${unrealized_loss:.2f}, PnL=${pnl_close:.2f}")
 
-            if _active_position['active'] and not closed:
-                current_price = pos['entry']
-
-            if closed:
+            # If all positions closed in this loop, generate new signal in next block
+            if closed_any and not _active_positions:
                 # Kapandıysa yeni sinyal üret
                 trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
                     gold_df, mas, current_price, atr_val,
@@ -2576,75 +2597,87 @@ def build_response_payload(interval='1min'):
 
         else:
             # ── YENİ SİNYAL ÜRET — v5.7 PATTERN-BASED ──
-            # Try pattern detection first (v5.7)
-            pattern_signal = generate_pattern_signal(current_price, atr_val, ACCOUNT_CONFIG['balance'])
+            # Only generate new signal if we have room for more positions
+            if len(_active_positions) < MAX_SIMULTANEOUS:
+                # Try pattern detection first (v5.7)
+                pattern_signal = generate_pattern_signal(current_price, atr_val, ACCOUNT_CONFIG['balance'])
 
-            # Fallback to composite signal if no pattern found
-            if pattern_signal:
-                trend = pattern_signal.get('direction', 'nötr')
-                if trend == 'LONG':
-                    trend = 'bullish'
-                elif trend == 'SHORT':
-                    trend = 'bearish'
+                # Fallback to composite signal if no pattern found
+                if pattern_signal:
+                    trend = pattern_signal.get('direction', 'nötr')
+                    if trend == 'LONG':
+                        trend = 'bullish'
+                    elif trend == 'SHORT':
+                        trend = 'bearish'
 
-                sl = pattern_signal.get('sl', 0)
-                tp1 = pattern_signal.get('tp1', 0)
-                tp2 = pattern_signal.get('tp2', 0)
-                lot = pattern_signal.get('lot', ACCOUNT_CONFIG['min_lot'])
-                pattern_name = pattern_signal.get('pattern', 'UNKNOWN')
-                confidence = pattern_signal.get('confidence', 0)
+                    # Check: don't open 2 positions with same trend
+                    same_trend_exists = any(p['trend'] == trend for p in _active_positions)
+                    if same_trend_exists:
+                        trend = 'nötr'
+                        sig_type = "SINYAL: Aynı yöne zaten açık pozisyon var"
+                        pattern_signal = None
+                    else:
+                        sl = pattern_signal.get('sl', 0)
+                        tp1 = pattern_signal.get('tp1', 0)
+                        tp2 = pattern_signal.get('tp2', 0)
+                        lot = pattern_signal.get('lot', ACCOUNT_CONFIG['min_lot'])
+                        pattern_name = pattern_signal.get('pattern', 'UNKNOWN')
+                        confidence = pattern_signal.get('confidence', 0)
 
-                sig_type = f"🎯 {pattern_name} — {trend.upper()} (Conf: {confidence}%)"
-                analysis = {
-                    'htf': 'Pattern detected',
-                    'structure': f'Pattern: {pattern_name}',
-                    'squeeze': 'Pattern analysis',
-                    'macd': 'N/A',
-                    'vwap': 'N/A',
-                    'confidence': f'{confidence}%',
-                    'pattern': pattern_name,
-                    'pattern_height': pattern_signal.get('pattern_height', 0),
-                }
-                quality_score = min(9, confidence // 10) if confidence > 0 else 0
-                quality_reasons = [pattern_name]
+                        sig_type = f"🎯 {pattern_name} — {trend.upper()} (Conf: {confidence}%)"
+                        analysis = {
+                            'htf': 'Pattern detected',
+                            'structure': f'Pattern: {pattern_name}',
+                            'squeeze': 'Pattern analysis',
+                            'macd': 'N/A',
+                            'vwap': 'N/A',
+                            'confidence': f'{confidence}%',
+                            'pattern': pattern_name,
+                            'pattern_height': pattern_signal.get('pattern_height', 0),
+                        }
+                        quality_score = min(9, confidence // 10) if confidence > 0 else 0
+                        quality_reasons = [pattern_name]
 
-                should_open = True  # v5.7: Pattern signals open directly
+                        should_open = True  # v5.7: Pattern signals open directly
 
-                # v3.12: Günlük güvenlik kontrolü
-                if should_open:
-                    can_trade, safety_msg = _can_open_trade()
-                    if not can_trade:
-                        should_open = False
-                        print(f"   {safety_msg}")
-                        analysis['daily_safety'] = safety_msg
+                        # v3.12: Günlük güvenlik kontrolü
+                        if should_open:
+                            can_trade, safety_msg = _can_open_trade()
+                            if not can_trade:
+                                should_open = False
+                                print(f"   {safety_msg}")
+                                analysis['daily_safety'] = safety_msg
 
-                if should_open:
-                    print(f"   ✅ POZİSYON AÇILIYOR — {pattern_name} {trend.upper()} @ ${current_price:.2f}, Lot: {lot}")
-                    _active_position = {
-                        'active': True, 'trend': trend, 'signal': sig_type,
-                        'entry': current_price, 'sl': round(sl, 2),
-                        'tp1': round(tp1, 2), 'tp2': round(tp2, 2), 'tp1_hit': False,
-                        'open_time': int(time.time()),
-                        'lot': lot,
-                        'remaining_lot': lot,
-                        'partial_done': False,
-                        'trailing_sl': sl,
-                        'pattern': pattern_name,
-                        'dynamic_tp_dollars': pattern_signal.get('dynamic_tp_dollars', TRADE_MGMT['tp_dollars']),
-                    }
-                    # Telegram'a sinyal gönder
-                    _temp_risk = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
-                    _temp_risk['lot_size'] = lot  # Use pattern lot
-                    send_telegram_signal(
-                        trend, current_price, round(sl, 2), round(tp1, 2), round(tp2, 2),
-                        f"{confidence}%", quality_score, quality_reasons, _temp_risk, analysis
-                    )
+                        if should_open:
+                            print(f"   ✅ POZİSYON AÇILIYOR — {pattern_name} {trend.upper()} @ ${current_price:.2f}, Lot: {lot}")
+                            _active_positions.append({
+                                'trend': trend, 'signal': sig_type,
+                                'entry': current_price, 'sl': round(sl, 2),
+                                'tp1': round(tp1, 2), 'tp2': round(tp2, 2), 'tp1_hit': False,
+                                'open_time': int(time.time()),
+                                'lot': lot,
+                                'remaining_lot': lot,
+                                'partial_done': False,
+                                'trailing_sl': sl,
+                                'pattern': pattern_name,
+                                'dynamic_tp_dollars': pattern_signal.get('dynamic_tp_dollars', TRADE_MGMT['tp_dollars']),
+                            })
+                            # Telegram'a sinyal gönder
+                            _temp_risk = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
+                            _temp_risk['lot_size'] = lot  # Use pattern lot
+                            send_telegram_signal(
+                                trend, current_price, round(sl, 2), round(tp1, 2), round(tp2, 2),
+                                f"{confidence}%", quality_score, quality_reasons, _temp_risk, analysis
+                            )
             else:
                 # Fallback: Use composite signal
                 trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
                     gold_df, mas, current_price, atr_val,
                     macd_v, macd_s, macd_h, rsi_val, vwap_val
                 )
+
+                # Check: don't open 2 positions with same trend
+                same_trend_exists = any(p['trend'] == trend for p in _active_positions)
 
                 # Kalite filtresi ile pozisyon aç
                 should_open = False
@@ -2654,7 +2687,9 @@ def build_response_payload(interval='1min'):
                 # Debug loglama
                 print(f"📊 Sinyal: trend={trend}, confidence={confidence}, price=${current_price:.2f}")
 
-                if confidence == "GÜÇLÜ" and trend in ("bullish", "bearish"):
+                if same_trend_exists:
+                    print(f"   ⚠️ Aynı yöne ({trend}) zaten açık pozisyon var — sinyal açılmadı")
+                elif confidence == "GÜÇLÜ" and trend in ("bullish", "bearish"):
                     quality_score, quality_reasons = calculate_signal_quality(
                         gold_df, current_price, trend, atr_val, rsi_val, vwap_val, bb_m, 50
                     )
@@ -2704,8 +2739,8 @@ def build_response_payload(interval='1min'):
 
                 if should_open:
                     print(f"   ✅ POZİSYON AÇILIYOR — {trend} @ ${current_price:.2f}")
-                    _active_position = {
-                        'active': True, 'trend': trend, 'signal': sig_type,
+                    _active_positions.append({
+                        'trend': trend, 'signal': sig_type,
                         'entry': current_price, 'sl': round(sl, 2),
                         'tp1': round(tp1, 2), 'tp2': round(tp2, 2), 'tp1_hit': False,
                         'open_time': int(time.time()),
@@ -2715,7 +2750,7 @@ def build_response_payload(interval='1min'):
                         'trailing_sl': sl,
                         'pattern': 'COMPOSITE',
                         'dynamic_tp_dollars': TRADE_MGMT['tp_dollars'],
-                    }
+                    })
                     # Telegram'a sinyal gönder
                     _temp_risk = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
                     send_telegram_signal(
@@ -2740,12 +2775,12 @@ def build_response_payload(interval='1min'):
             "risk": risk_metrics,
             "quality_score": quality_score,
             "quality_reasons": quality_reasons,
-            # v5.7 Pattern fields
-            "pattern": _active_position.get('pattern', ''),
+            # v5.7 Pattern fields - reference first position if exists
+            "pattern": _active_positions[0].get('pattern', '') if _active_positions else '',
             "pattern_confidence": analysis.get('confidence', 0),
-            "lot_size": _active_position.get('lot', ACCOUNT_CONFIG['min_lot']),
-            "trailing_active": bool(_active_position.get('trailing_sl', 0) != 0),
-            "partial_done": _active_position.get('partial_done', False),
+            "lot_size": _active_positions[0].get('lot', ACCOUNT_CONFIG['min_lot']) if _active_positions else ACCOUNT_CONFIG['min_lot'],
+            "trailing_active": any(p.get('trailing_sl', 0) != 0 for p in _active_positions),
+            "partial_done": any(p.get('partial_done', False) for p in _active_positions),
         }
 
         # Grafik verilerini hazırla
@@ -2806,6 +2841,13 @@ def build_response_payload(interval='1min'):
             "geopolitics": get_cached_geopolitics(),
             "history_count": history_len,
             "last_updated": int(time.time() * 1000),
+            "active_positions": [
+                {"trend": p['trend'], "entry": p['entry'], "sl": p['sl'],
+                 "tp1": p['tp1'], "tp2": p['tp2'],
+                 "pattern": p.get('pattern', ''), "lot": p.get('lot', 0.01),
+                 "open_time": p.get('open_time', 0)}
+                for p in _active_positions
+            ],
             "daily_safety": {
                 "trades_today": _daily_state['trades_today'],
                 "max_trades": DAILY_SAFETY['max_trades_per_day'],
@@ -3188,7 +3230,8 @@ def telegram_debug():
         "telegram_enabled": TELEGRAM_ENABLED,
         "token_set": bool(TELEGRAM_BOT_TOKEN),
         "chat_id_set": bool(TELEGRAM_CHAT_ID),
-        "active_position": _active_position,
+        "active_positions": _active_positions,
+        "active_positions_count": len(_active_positions),
         "trade_history_count": len(_trade_history),
         "last_telegram_signal": _last_telegram_signal
     })
@@ -3279,14 +3322,16 @@ def get_trade_history():
             "starting_balance": 100.0,
         },
         "equity_curve": equity,
-        "active_position": {
-            "active": _active_position['active'],
-            "trend": _active_position['trend'],
-            "entry": _active_position['entry'],
-            "sl": _active_position['sl'],
-            "tp1": _active_position['tp1'],
-            "tp2": _active_position['tp2']
-        } if _active_position['active'] else None,
+        "active_positions": [
+            {
+                "trend": p['trend'],
+                "entry": p['entry'],
+                "sl": p['sl'],
+                "tp1": p['tp1'],
+                "tp2": p['tp2'],
+                "pattern": p.get('pattern', '')
+            } for p in _active_positions
+        ] if _active_positions else [],
         "daily_safety": {
             "trades_today": _daily_state['trades_today'],
             "max_trades": DAILY_SAFETY['max_trades_per_day'],
