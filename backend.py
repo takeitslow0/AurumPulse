@@ -2604,13 +2604,13 @@ def build_response_payload(interval='1min'):
                             closed_any = True
                             print(f"   ⚡ EARLY EXIT SHORT: {time_in_trade}sn, loss=${unrealized_loss:.2f}, PnL=${pnl_close:.2f}")
 
-            # If all positions closed in this loop, generate new signal in next block
-            if closed_any and not _active_positions:
-                # Kapandıysa yeni sinyal üret
-                trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
-                    gold_df, mas, current_price, atr_val,
-                    macd_v, macd_s, macd_h, rsi_val, vwap_val
-                )
+              # If all positions closed in this loop, generate new signal in next block
+              if closed_any and not _active_positions:
+                  # Kapandıysa yeni sinyal üret
+                  trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
+                      gold_df, mas, current_price, atr_val,
+                      macd_v, macd_s, macd_h, rsi_val, vwap_val
+                  )
 
         else:
             # ── YENİ SİNYAL ÜRET — v5.7 PATTERN-BASED ──
