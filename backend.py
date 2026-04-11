@@ -316,7 +316,14 @@ def _can_open_trade():
     _check_daily_reset()
     now = int(time.time())
 
-    # 0) Bakiye koruması — $0 veya altıysa trade açma
+    # 0) Hafta sonu kontrolü — Altın piyasası Cuma 22:00 UTC - Pazar 22:00 UTC arası kapalı
+    utc_now = datetime.now(timezone.utc)
+    weekday = utc_now.weekday()  # 0=Pazartesi, 4=Cuma, 5=Cumartesi, 6=Pazar
+    hour = utc_now.hour
+    if weekday == 5 or weekday == 6 or (weekday == 4 and hour >= 22) or (weekday == 0 and hour < 0):
+        return False, "📅 PİYASA KAPALI — Hafta sonu (Cuma 22:00 - Pazar 22:00 UTC)"
+
+    # 0b) Bakiye koruması — $0 veya altıysa trade açma
     if ACCOUNT_CONFIG['balance'] <= 0:
         return False, "🚫 BAKİYE SIFIR — Simülasyon durduruldu. Bakiye: $0.00"
 
@@ -2484,10 +2491,20 @@ def build_response_payload(interval='1min'):
             sig_type = kill_switch_status.get('message', 'KİLİTLİ')
 
         elif _active_positions:
-            # ── AKTİF POZİSYONLAR KONTROLÜ — iterate in reverse to safely remove ──
-            closed_any = False
+            # ── HAFTA SONU KONTROLÜ — Piyasa kapalıysa pozisyonları dondur ──
+            _utc_now = datetime.now(timezone.utc)
+            _wd = _utc_now.weekday()
+            _hr = _utc_now.hour
+            _market_closed = (_wd == 5 or _wd == 6 or (_wd == 4 and _hr >= 22))
+            if _market_closed:
+                sig_type = "📅 PİYASA KAPALI — Açık pozisyonlar donduruldu"
+                trend = _active_positions[0]['trend'] if _active_positions else 'nötr'
+                # Pozisyonlara dokunma, fiyat kontrolü yapma
+            else:
+              # ── AKTİF POZİSYONLAR KONTROLÜ — iterate in reverse to safely remove ──
+              closed_any = False
 
-            for idx in range(len(_active_positions) - 1, -1, -1):
+              for idx in range(len(_active_positions) - 1, -1, -1):
                 pos = _active_positions[idx]
                 pos_closed = False
 
