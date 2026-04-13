@@ -940,28 +940,50 @@
 
         if (data.rsi_series && data.rsi_series.length > 0) renderRsiChart(data.rsi_series);
 
-        // News
-        if (data.news_data && data.news_data.length > 0) {
+        // News — data.news_data is a dict with .articles array
+        if (data.news_data) {
           const nc = document.getElementById('newsContainer');
-          if (nc) nc.innerHTML = data.news_data.slice(0, 8).map(n =>
-            `<div style="padding:10px 0;border-bottom:1px solid var(--card-border)">
-              <a href="${n.link}" target="_blank" style="color:var(--text);text-decoration:none;font-size:12px;font-weight:500">${n.title}</a>
-              <div style="font-size:10px;color:var(--text3);margin-top:3px">${n.source || ''}</div>
-            </div>`
-          ).join('');
+          const articles = data.news_data.articles || [];
+          if (nc && articles.length > 0) {
+            let newsHtml = '';
+            // Overall sentiment header
+            if (data.news_data.overall_text) {
+              const oClass = data.news_data.overall_class;
+              const oColor = oClass === 'bullish' ? 'var(--green)' : oClass === 'bearish' ? 'var(--red)' : 'var(--text2)';
+              newsHtml += `<div style="padding:10px;background:rgba(255,255,255,0.02);border-radius:6px;margin-bottom:10px;font-size:12px;font-weight:600;color:${oColor}">${data.news_data.overall_text}</div>`;
+            }
+            newsHtml += articles.slice(0, 8).map(n => {
+              const sColor = n.score > 0 ? 'var(--green)' : n.score < 0 ? 'var(--red)' : 'var(--text3)';
+              const impText = n.score > 0 ? 'YUKSELIS' : n.score < 0 ? 'DUSUS' : 'NOTR';
+              return `<div style="padding:8px 0;border-bottom:1px solid var(--card-border)">
+                <div style="display:flex;justify-content:space-between;align-items:start;gap:8px">
+                  <a href="${n.link}" target="_blank" style="color:var(--text);text-decoration:none;font-size:12px;font-weight:500;flex:1">${n.title}</a>
+                  <span style="font-size:9px;padding:2px 6px;border-radius:3px;font-weight:600;color:${sColor};white-space:nowrap">${impText}</span>
+                </div>
+                <div style="font-size:10px;color:var(--text3);margin-top:3px">${n.category || ''} ${n.time || ''}</div>
+              </div>`;
+            }).join('');
+            nc.innerHTML = newsHtml;
+          } else if (nc) {
+            nc.innerHTML = '<div class="empty-state"><div class="icon">📰</div><div class="msg">Altinla ilgili haber bulunamadi</div></div>';
+          }
         }
 
-        // Events
+        // Events — data.upcoming_events is an array of event objects
         if (data.upcoming_events && data.upcoming_events.length > 0) {
           const ec = document.getElementById('eventsContainer');
-          if (ec) ec.innerHTML = data.upcoming_events.slice(0, 6).map(e => {
-            const impColor = e.impact === 'high' ? 'var(--red)' : e.impact === 'medium' ? 'var(--gold)' : 'var(--text3)';
+          if (ec) ec.innerHTML = data.upcoming_events.slice(0, 8).map(e => {
+            const urgColor = e.urgency === 'critical' ? 'var(--red)' : e.urgency === 'imminent' ? 'var(--gold)' : 'var(--text3)';
+            const scoreColor = e.gold_score > 0 ? 'var(--green)' : e.gold_score < 0 ? 'var(--red)' : 'var(--text3)';
             return `<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.03)">
-              <div style="display:flex;justify-content:space-between">
+              <div style="display:flex;justify-content:space-between;align-items:center">
                 <span style="font-size:12px;font-weight:500">${e.title}</span>
-                <span style="font-size:10px;color:${impColor};font-weight:600">${(e.impact||'').toUpperCase()}</span>
+                <span style="font-size:10px;color:${urgColor};font-weight:600">${e.status}</span>
               </div>
-              <div style="font-size:10px;color:var(--text3);margin-top:2px">${e.country || ''} ${e.date || ''}</div>
+              <div style="display:flex;justify-content:space-between;margin-top:3px">
+                <span style="font-size:10px;color:var(--text3)">${e.time_label}</span>
+                <span style="font-size:10px;color:${scoreColor}">${e.gold_reason || ''}</span>
+              </div>
             </div>`;
           }).join('');
         }

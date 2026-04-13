@@ -2806,17 +2806,18 @@ def build_response_payload(interval='1min'):
                         analysis['daily_safety'] = safety_msg
 
                 if should_open:
-                    print(f"   ✅ POZİSYON AÇILIYOR — {trend} @ ${current_price:.2f}")
+                    _pattern_label = 'BASİT' if confidence == 'BASİT' else 'COMPOSITE'
+                    print(f"   ✅ POZİSYON AÇILIYOR — {_pattern_label} {trend} @ ${current_price:.2f}")
                     _active_positions.append({
                         'trend': trend, 'signal': sig_type,
                         'entry': current_price, 'sl': round(sl, 2),
                         'tp1': round(tp1, 2), 'tp2': round(tp2, 2), 'tp1_hit': False,
                         'open_time': int(time.time()),
-                        'lot': ACCOUNT_CONFIG['min_lot'],  # Composite fallback uses min lot
+                        'lot': ACCOUNT_CONFIG['min_lot'],
                         'remaining_lot': ACCOUNT_CONFIG['min_lot'],
                         'partial_done': False,
                         'trailing_sl': sl,
-                        'pattern': 'COMPOSITE',
+                        'pattern': _pattern_label,
                         'dynamic_tp_dollars': TRADE_MGMT['tp_dollars'],
                     })
                     # Telegram'a sinyal gönder
@@ -2950,6 +2951,12 @@ def background_scanner():
                 payload = build_response_payload('1min')
                 if payload:
                     socketio.emit('market_update', payload)
+                    # Sinyal durumu log
+                    ts = payload.get('trading_signals', {})
+                    ap = len(_active_positions)
+                    print(f"   📊 Sinyal: {ts.get('trend','?')} | Conf: {ts.get('pattern','?')} | Aktif Poz: {ap}/3 | RSI: {rsi:.1f}")
+            else:
+                print(f"   ⚠️ Altın verisi boş geldi — API hatası olabilir")
             elapsed = time.time() - t0
             print(f"⚡ Scan tamamlandı: {elapsed:.1f}sn")
         except Exception as e:
