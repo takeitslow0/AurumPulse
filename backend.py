@@ -1731,8 +1731,298 @@ def detect_flag(df, idx, atr):
         }
 
 
+def detect_double_top(swing_highs, swing_lows, current_price, atr, idx):
+    """
+    M kalıbı: İki benzer tepe + aradaki dip (neckline)
+    Neckline kırılımında SHORT — Double Bottom'ın tersi
+    """
+    if len(swing_highs) < 2 or len(swing_lows) < 1:
+        return None
+
+    for i in range(len(swing_highs) - 1, 0, -1):
+        high2_idx, high2 = swing_highs[i]
+        high1_idx, high1 = swing_highs[i - 1]
+
+        bar_dist = high2_idx - high1_idx
+        if bar_dist < 5 or bar_dist > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        tolerance = PATTERN_CONFIG['double_tolerance_pct'] * atr
+        if abs(high1 - high2) > tolerance:
+            continue
+
+        # Aradaki en düşük nokta = neckline
+        mid_lows = [l for l in swing_lows if high1_idx < l[0] < high2_idx]
+        if not mid_lows:
+            continue
+        neckline_idx, neckline = min(mid_lows, key=lambda x: x[1])
+
+        if current_price < neckline:
+            pattern_height = max(high1, high2) - neckline
+            return {
+                'pattern': 'DOUBLE_TOP',
+                'direction': 'SHORT',
+                'neckline': neckline,
+                'height': pattern_height,
+                'confidence': 80,
+                'high1': high1, 'high2': high2,
+            }
+
+    return None
+
+
+def detect_rising_wedge(df, swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Yükselen Kama: Hem tepeler hem dipler yükseliyor ama tepeler daha yavaş
+    Yukarı daralan yapı → kırılım genelde aşağı → SHORT
+    En az 2 swing high + 2 swing low gerekli
+    """
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
+
+    # Son 4 swing noktasını al (en az 2 high + 2 low)
+    for i in range(len(swing_highs) - 1, 0, -1):
+        sh2_idx, sh2 = swing_highs[i]
+        sh1_idx, sh1 = swing_highs[i - 1]
+
+        # İki swing low bul — high'lar arasında veya yakınında
+        relevant_lows = [l for l in swing_lows if sh1_idx - 3 <= l[0] <= sh2_idx + 3]
+        if len(relevant_lows) < 2:
+            continue
+
+        sl1_idx, sl1 = relevant_lows[0]
+        sl2_idx, sl2 = relevant_lows[-1]
+
+        # Hem tepeler hem dipler yükseliyor mu?
+        if sh2 <= sh1 or sl2 <= sl1:
+            continue
+
+        # Tepeler daha yavaş yükseliyor mu? (daralan yapı)
+        high_rise = sh2 - sh1
+        low_rise = sl2 - sl1
+        if high_rise >= low_rise:
+            continue  # Paralel veya açılan — wedge değil
+
+        # Bar mesafesi kontrolü
+        span = sh2_idx - sh1_idx
+        if span < 8 or span > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        # Fiyat alt çizginin altına düştü mü? (kırılım)
+        lower_trendline = sl2 + (low_rise / max(1, sl2_idx - sl1_idx)) * (idx - sl2_idx)
+        if current_price < lower_trendline:
+            pattern_height = sh2 - sl2
+            return {
+                'pattern': 'RISING_WEDGE',
+                'direction': 'SHORT',
+                'neckline': lower_trendline,
+                'height': pattern_height,
+                'confidence': 72,
+            }
+
+    return None
+
+
+def detect_falling_wedge(df, swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Düşen Kama: Hem tepeler hem dipler düşüyor ama dipler daha yavaş
+    Aşağı daralan yapı → kırılım genelde yukarı → LONG
+    """
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
+
+    for i in range(len(swing_lows) - 1, 0, -1):
+        sl2_idx, sl2 = swing_lows[i]
+        sl1_idx, sl1 = swing_lows[i - 1]
+
+        relevant_highs = [h for h in swing_highs if sl1_idx - 3 <= h[0] <= sl2_idx + 3]
+        if len(relevant_highs) < 2:
+            continue
+
+        sh1_idx, sh1 = relevant_highs[0]
+        sh2_idx, sh2 = relevant_highs[-1]
+
+        # Hem tepeler hem dipler düşüyor mu?
+        if sh2 >= sh1 or sl2 >= sl1:
+            continue
+
+        # Dipler daha yavaş düşüyor mu? (daralan yapı)
+        high_drop = sh1 - sh2
+        low_drop = sl1 - sl2
+        if low_drop >= high_drop:
+            continue
+
+        span = sl2_idx - sl1_idx
+        if span < 8 or span > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        # Fiyat üst çizginin üstüne çıktı mı? (kırılım)
+        upper_trendline = sh2 - (high_drop / max(1, sh2_idx - sh1_idx)) * (idx - sh2_idx)
+        if current_price > upper_trendline:
+            pattern_height = sh2 - sl2
+            return {
+                'pattern': 'FALLING_WEDGE',
+                'direction': 'LONG',
+                'neckline': upper_trendline,
+                'height': pattern_height,
+                'confidence': 74,
+            }
+
+    return None
+
+
+def detect_ascending_triangle(swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Yükselen Üçgen: Düz direnç (yatay tepeler) + yükselen destek (yükselen dipler)
+    Direnç kırılımında LONG
+    """
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
+
+    # Son 2+ tepeyi kontrol et — yaklaşık aynı seviyede mi?
+    for i in range(len(swing_highs) - 1, 0, -1):
+        sh2_idx, sh2 = swing_highs[i]
+        sh1_idx, sh1 = swing_highs[i - 1]
+
+        tolerance = PATTERN_CONFIG['double_tolerance_pct'] * atr
+        if abs(sh1 - sh2) > tolerance:
+            continue
+
+        span = sh2_idx - sh1_idx
+        if span < 6 or span > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        # Aradaki dipler yükseliyor mu?
+        relevant_lows = [l for l in swing_lows if sh1_idx <= l[0] <= sh2_idx]
+        if len(relevant_lows) < 1:
+            continue
+
+        # Tüm dipler → son dip ilkinden yüksek mi?
+        all_lows_in_range = sorted([l for l in swing_lows if sh1_idx - 3 <= l[0] <= sh2_idx + 3], key=lambda x: x[0])
+        if len(all_lows_in_range) >= 2:
+            if all_lows_in_range[-1][1] <= all_lows_in_range[0][1]:
+                continue  # Dipler yükselmiyor
+
+        resistance = (sh1 + sh2) / 2
+
+        # Fiyat direnci kırdı mı?
+        if current_price > resistance + 0.1 * atr:
+            pattern_height = resistance - min(l[1] for l in all_lows_in_range)
+            return {
+                'pattern': 'ASC_TRIANGLE',
+                'direction': 'LONG',
+                'neckline': resistance,
+                'height': pattern_height,
+                'confidence': 76,
+            }
+
+    return None
+
+
+def detect_descending_triangle(swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Düşen Üçgen: Düz destek (yatay dipler) + düşen direnç (düşen tepeler)
+    Destek kırılımında SHORT
+    """
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
+
+    for i in range(len(swing_lows) - 1, 0, -1):
+        sl2_idx, sl2 = swing_lows[i]
+        sl1_idx, sl1 = swing_lows[i - 1]
+
+        tolerance = PATTERN_CONFIG['double_tolerance_pct'] * atr
+        if abs(sl1 - sl2) > tolerance:
+            continue
+
+        span = sl2_idx - sl1_idx
+        if span < 6 or span > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        # Aradaki tepeler düşüyor mu?
+        all_highs_in_range = sorted([h for h in swing_highs if sl1_idx - 3 <= h[0] <= sl2_idx + 3], key=lambda x: x[0])
+        if len(all_highs_in_range) >= 2:
+            if all_highs_in_range[-1][1] >= all_highs_in_range[0][1]:
+                continue  # Tepeler düşmüyor
+
+        support = (sl1 + sl2) / 2
+
+        if current_price < support - 0.1 * atr:
+            pattern_height = max(h[1] for h in all_highs_in_range) - support if all_highs_in_range else atr * 2
+            return {
+                'pattern': 'DESC_TRIANGLE',
+                'direction': 'SHORT',
+                'neckline': support,
+                'height': pattern_height,
+                'confidence': 74,
+            }
+
+    return None
+
+
+def detect_symmetric_triangle(swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Simetrik Üçgen: Düşen tepeler + yükselen dipler → daralan yapı
+    Kırılım yönüne göre LONG veya SHORT
+    """
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
+
+    # Son 2 high ve 2 low
+    sh1_idx, sh1 = swing_highs[-2] if len(swing_highs) >= 2 else (0, 0)
+    sh2_idx, sh2 = swing_highs[-1]
+    sl1_idx, sl1 = swing_lows[-2] if len(swing_lows) >= 2 else (0, 0)
+    sl2_idx, sl2 = swing_lows[-1]
+
+    if sh1 == 0 or sl1 == 0:
+        return None
+
+    # Tepeler düşüyor + dipler yükseliyor mu?
+    if sh2 >= sh1 or sl2 <= sl1:
+        return None
+
+    # Span kontrolü
+    min_idx = min(sh1_idx, sl1_idx)
+    max_idx = max(sh2_idx, sl2_idx)
+    span = max_idx - min_idx
+    if span < 8 or span > PATTERN_CONFIG['pattern_lookback']:
+        return None
+
+    # Daralan yapı: tepeler arası fark azalıyor, dipler arası fark azalıyor
+    converge_top = sh1 - sh2
+    converge_bottom = sl2 - sl1
+    # Her iki taraf da daralmaya katkı yapmalı
+    if converge_top <= 0 or converge_bottom <= 0:
+        return None
+
+    pattern_height = sh2 - sl2
+
+    # Kırılım yönü: üst çizgi kırıldıysa LONG, alt çizgi kırıldıysa SHORT
+    upper_approx = sh2 - (converge_top / max(1, sh2_idx - sh1_idx)) * (idx - sh2_idx)
+    lower_approx = sl2 + (converge_bottom / max(1, sl2_idx - sl1_idx)) * (idx - sl2_idx)
+
+    if current_price > upper_approx + 0.1 * atr:
+        return {
+            'pattern': 'SYM_TRIANGLE_BULL',
+            'direction': 'LONG',
+            'neckline': upper_approx,
+            'height': pattern_height,
+            'confidence': 68,
+        }
+    elif current_price < lower_approx - 0.1 * atr:
+        return {
+            'pattern': 'SYM_TRIANGLE_BEAR',
+            'direction': 'SHORT',
+            'neckline': lower_approx,
+            'height': pattern_height,
+            'confidence': 68,
+        }
+
+    return None
+
+
 def detect_patterns(df, idx, atr):
-    """Tüm kalıpları tara, en güvenilir olanı döndür"""
+    """Tüm kalıpları tara, en güvenilir olanı döndür — 11 pattern"""
     swing_highs, swing_lows = find_swings(df, idx, PATTERN_CONFIG['pattern_lookback'])
     current_price = float(df.iloc[idx]['close'])
 
@@ -1758,11 +2048,43 @@ def detect_patterns(df, idx, atr):
     if p:
         patterns_found.append(p)
 
+    # Double Top (v6.0)
+    p = detect_double_top(swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Rising Wedge (v6.0)
+    p = detect_rising_wedge(df, swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Falling Wedge (v6.0)
+    p = detect_falling_wedge(df, swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Ascending Triangle (v6.0)
+    p = detect_ascending_triangle(swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Descending Triangle (v6.0)
+    p = detect_descending_triangle(swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Symmetric Triangle (v6.0)
+    p = detect_symmetric_triangle(swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
     if not patterns_found:
         return None
 
     # En yüksek güvenilirliğe sahip kalıbı seç
-    return max(patterns_found, key=lambda x: x['confidence'])
+    best = max(patterns_found, key=lambda x: x['confidence'])
+    print(f"   🔍 Pattern bulundu: {best['pattern']} ({best['confidence']}%) — Toplam {len(patterns_found)} aday")
+    return best
 
 
 def generate_pattern_signal(current_price, atr_val, balance):
