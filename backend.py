@@ -205,7 +205,7 @@ def safe_float(val, default=0.0, decimals=4):
 # ─────────────────────────────────────────
 # TWELVE DATA AYARLARI
 # ─────────────────────────────────────────
-TD_API_KEY  = "8097cbc95b844cf1be80225f069eaefe"
+TD_API_KEY  = "475598133d5a49ae82220c6a4fcaaf9b"
 TD_BASE_URL = "https://api.twelvedata.com"
 
 GOLD_SYMBOL    = "XAU/USD"
