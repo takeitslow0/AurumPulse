@@ -493,6 +493,14 @@ def calculate_risk_metrics(current_price, sl, tp1, tp2, trend_dir):
     """
     Tam risk metrikleri hesaplar: lot, risk $, risk %, potansiyel kâr, R:R oranı.
     """
+    # SL/TP 0 ise sinyal yok demektir — boş metrik döndür
+    if sl == 0 or tp1 == 0 or tp2 == 0 or current_price == 0:
+        return {
+            "lot_size": 0, "risk_usd": 0, "risk_pct": 0,
+            "sl_distance": 0, "tp1_profit": 0, "tp2_profit": 0,
+            "rr_tp1": 0, "rr_tp2": 0,
+            "account_balance": ACCOUNT_CONFIG['balance'], "warning": ""
+        }
     sl_distance = abs(current_price - sl)
     lot, risk_usd, risk_pct = calculate_position_size(sl_distance)
     contract = ACCOUNT_CONFIG['contract_size']
@@ -2730,11 +2738,54 @@ def build_response_payload(interval='1min'):
                     print(f"   ZAYIF sinyal kalite: {quality_score}/9 → SİMÜLASYON TRADE (min lot)")
                     should_open = True
                     quality_reasons.append('SİMÜLASYON-ZAYIF')
+                elif confidence == "YOK" and trend == "nötr":
+                    # ── BASİT SİNYAL FALLBACK — RSI + MACD + VWAP ile trade aç ──
+                    simple_bull = 0
+                    simple_bear = 0
+                    # MACD histogram yönü
+                    if macd_h > 0: simple_bull += 1
+                    elif macd_h < 0: simple_bear += 1
+                    # RSI momentum
+                    if rsi_val > 55: simple_bull += 1
+                    elif rsi_val < 45: simple_bear += 1
+                    # VWAP pozisyonu
+                    if vwap_val > 0:
+                        if current_price > vwap_val: simple_bull += 1
+                        elif current_price < vwap_val: simple_bear += 1
+                    # MA20 yönü
+                    if ma20_val > 0:
+                        if current_price > ma20_val: simple_bull += 1
+                        elif current_price < ma20_val: simple_bear += 1
+
+                    if simple_bull >= 3 and simple_bear == 0 and rsi_val < 65:
+                        trend = "bullish"
+                        confidence = "BASİT"
+                        sig_type = f"📈 BASİT LONG — RSI+MACD+VWAP ({simple_bull}/4) 🟢"
+                        sl = current_price - (1.5 * atr_val)
+                        tp1 = current_price + (2.0 * atr_val)
+                        tp2 = current_price + (3.0 * atr_val)
+                        should_open = True
+                        quality_score = simple_bull
+                        quality_reasons = ['BASİT-LONG', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}']
+                        print(f"   📈 BASİT LONG sinyal: bull={simple_bull}, bear={simple_bear}")
+                    elif simple_bear >= 3 and simple_bull == 0 and rsi_val > 35:
+                        trend = "bearish"
+                        confidence = "BASİT"
+                        sig_type = f"📉 BASİT SHORT — RSI+MACD+VWAP ({simple_bear}/4) 🔴"
+                        sl = current_price + (1.5 * atr_val)
+                        tp1 = current_price - (2.0 * atr_val)
+                        tp2 = current_price - (3.0 * atr_val)
+                        should_open = True
+                        quality_score = simple_bear
+                        quality_reasons = ['BASİT-SHORT', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}']
+                        print(f"   📉 BASİT SHORT sinyal: bull={simple_bull}, bear={simple_bear}")
+                    else:
+                        print(f"   Sinyal açılmadı: BASİT filtre geçemedi (bull={simple_bull}, bear={simple_bear})")
                 else:
                     print(f"   Sinyal açılmadı: confidence={confidence}, trend={trend}")
 
-                # MACD Histogram yön onayı — GÜÇLÜ/ORTA sinyallerde zorunlu, ZAYIF'ta skip
-                if should_open and confidence != "ZAYIF":
+                # MACD Histogram yön onayı — GÜÇLÜ/ORTA sinyallerde zorunlu, ZAYIF/BASİT'te skip
+                if should_open and confidence not in ("ZAYIF", "BASİT"):
                     if trend == 'bullish' and macd_h <= 0:
                         should_open = False
                         print(f"   ❌ MACD onay başarısız: LONG sinyal ama MACD_H={macd_h:.4f} (negatif)")
