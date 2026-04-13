@@ -1330,6 +1330,7 @@ def fetch_timeseries(symbol, interval, outputsize=120):
         resp = _safe_get(f"{TD_BASE_URL}/time_series", params)
         data = resp.json()
         if data.get("status") == "error" or not data.get("values"):
+            print(f"⚠️ TwelveData HATA — {symbol}/{interval}: status={data.get('status')}, code={data.get('code')}, message={data.get('message', 'N/A')}")
             return pd.DataFrame()
         df = pd.DataFrame(data.get("values"))
         if 'datetime' in df.columns:
@@ -4143,6 +4144,57 @@ def get_history():
         return jsonify({"records": safe_records, "count": len(safe_records)})
     except Exception as e:
         return jsonify({"error": f"Sunucu Hatası: {str(e)}"})
+
+@app.route('/api/debug_api')
+def debug_api():
+    """TwelveData API'yi doğrudan test et — tarayıcıdan API durumunu gör"""
+    results = {}
+    try:
+        # Test 1: Gold 1min (ana veri)
+        params1 = {"symbol": "XAU/USD", "interval": "1min", "outputsize": 3,
+                    "apikey": TD_API_KEY, "format": "JSON", "timezone": "UTC"}
+        resp1 = requests.get(f"{TD_BASE_URL}/time_series", params=params1, timeout=15)
+        data1 = resp1.json()
+        results['gold_1min'] = {
+            "http_status": resp1.status_code,
+            "api_status": data1.get("status", "ok"),
+            "code": data1.get("code"),
+            "message": data1.get("message"),
+            "has_values": bool(data1.get("values")),
+            "value_count": len(data1.get("values", [])),
+            "first_value": data1.get("values", [{}])[0] if data1.get("values") else None,
+        }
+    except Exception as e:
+        results['gold_1min'] = {"error": str(e)}
+
+    try:
+        # Test 2: Gold 5min (pattern detection)
+        params2 = {"symbol": "XAU/USD", "interval": "5min", "outputsize": 3,
+                    "apikey": TD_API_KEY, "format": "JSON", "timezone": "UTC"}
+        resp2 = requests.get(f"{TD_BASE_URL}/time_series", params=params2, timeout=15)
+        data2 = resp2.json()
+        results['gold_5min'] = {
+            "http_status": resp2.status_code,
+            "api_status": data2.get("status", "ok"),
+            "code": data2.get("code"),
+            "message": data2.get("message"),
+            "has_values": bool(data2.get("values")),
+            "value_count": len(data2.get("values", [])),
+        }
+    except Exception as e:
+        results['gold_5min'] = {"error": str(e)}
+
+    try:
+        # Test 3: API key usage
+        resp3 = requests.get(f"{TD_BASE_URL}/api_usage", params={"apikey": TD_API_KEY}, timeout=10)
+        results['api_usage'] = resp3.json()
+    except Exception as e:
+        results['api_usage'] = {"error": str(e)}
+
+    results['timestamp'] = datetime.now(timezone.utc).isoformat()
+    results['api_key_first8'] = TD_API_KEY[:8] + "..."
+    return jsonify(results)
+
 
 @app.route('/api/debug_signal')
 def debug_signal():
