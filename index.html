@@ -1147,10 +1147,10 @@
           _initRetry = 0;
           updateDashboard(data);
           // WebSocket varsa polling yavas, yoksa hizli
-          const pollInterval = _socket && _socket.connected ? 30000 : 15000;
+          const pollInterval = _socket && _socket.connected ? 60000 : 30000;
           setInterval(loadData, pollInterval);
           setInterval(loadEventPredictions, 120000);
-          setInterval(loadTradeHistory, 30000);
+          setInterval(loadTradeHistory, 60000);
           setInterval(loadHistory, 300000);
         }
       } catch(e) {

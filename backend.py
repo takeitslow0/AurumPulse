@@ -251,9 +251,9 @@ _dxy_cache  = {'df': pd.DataFrame(), 'sym': '', 'ts': 0}
 _htf_cache  = {'df': pd.DataFrame(), 'ts': 0}  # 15dk HTF cache
 _cache_lock = threading.Lock()
 
-GOLD_TTL = {'1min': 150, '5min': 600, '15min': 900, '1h': 3600}
-DXY_TTL  = 1800  # DXY 30dk cache — çok yavaş değişir, API tasarrufu
-HTF_TTL  = 1800  # 15dk cache 30 dakika — API tasarrufu
+GOLD_TTL = {'1min': 120, '5min': 600, '15min': 900, '1h': 3600}
+DXY_TTL  = 3600  # DXY 1 saat cache — API tasarrufu
+HTF_TTL  = 3600  # 15dk cache 1 saat — API tasarrufu
 
 # ─────────────────────────────────────────
 # AKTİF POZİSYON TAKİBİ
@@ -1386,11 +1386,11 @@ def get_htf_data():
 
 # 5dk cache — orta vadeli momentum onayı
 _mtf_cache = {'df': pd.DataFrame(), 'ts': 0}
-MTF_TTL = 900  # 5dk cache 15 dakika — API tasarrufu
+MTF_TTL = 1800  # 5dk cache 30 dakika — API tasarrufu
 
 # 5dk Pattern Detection Cache — v5.7 pattern strategy her zaman 5dk veri kullanır
 _pattern_cache = {'df': pd.DataFrame(), 'ts': 0}
-PATTERN_CACHE_TTL = 900  # 15 dakika cache — API tasarrufu (MTF ile aynı veriyi kullanır)
+PATTERN_CACHE_TTL = 1800  # 30 dakika cache — API tasarrufu (MTF ile aynı veriyi kullanır)
 
 def get_mtf_data():
     """5 dakikalık veriyi çeker — Momentum onayı + Pattern detection ortak cache."""
@@ -3306,6 +3306,21 @@ def build_response_payload(interval='1min'):
                       macd_v, macd_s, macd_h, rsi_val, vwap_val
                   )
 
+            # ── AKTİF POZİSYON VARKEN SİNYAL KARTINI GÜNCELLE ──
+            if _active_positions:
+                _main_pos = _active_positions[0]
+                trend = _main_pos['trend']
+                sl = _main_pos['sl']
+                tp1 = _main_pos['tp1']
+                tp2 = _main_pos['tp2']
+                confidence = _main_pos.get('pattern', 'COMPOSITE')
+                if not sig_type or sig_type == "YÖNSÜZ / BEKLE ⚪":
+                    _dir_text = "LONG 📈" if trend == 'bullish' else "SHORT 📉"
+                    _pnl = (current_price - _main_pos['entry']) if trend == 'bullish' else (_main_pos['entry'] - current_price)
+                    _lot = _main_pos.get('lot', 0.01)
+                    _pnl_usd = _pnl * _lot * ACCOUNT_CONFIG['contract_size']
+                    sig_type = f"🔄 AKTİF {_dir_text} — PnL: {'+'if _pnl_usd>=0 else ''}${_pnl_usd:.2f}"
+
         else:
             # ── YENİ SİNYAL ÜRET — v5.7 PATTERN-BASED ──
             # Only generate new signal if we have room for more positions
@@ -3360,7 +3375,25 @@ def build_response_payload(interval='1min'):
                                 analysis['daily_safety'] = safety_msg
 
                         if should_open:
-                            print(f"   ✅ POZİSYON AÇILIYOR — {pattern_name} {trend.upper()} @ ${current_price:.2f}, Lot: {lot}")
+                            # SL DOĞRULAMA: LONG=SL altında, SHORT=SL üstünde olmalı
+                            if trend == 'bullish' and sl >= current_price:
+                                sl = current_price - (1.5 * atr_val)
+                                print(f"   ⚠️ SL düzeltildi (LONG): ${sl:.2f}")
+                            elif trend == 'bearish' and sl <= current_price:
+                                sl = current_price + (1.5 * atr_val)
+                                print(f"   ⚠️ SL düzeltildi (SHORT): ${sl:.2f}")
+                            # TP DOĞRULAMA
+                            if trend == 'bullish' and tp1 <= current_price:
+                                sl_dist = current_price - sl
+                                tp1 = current_price + (1.5 * sl_dist)
+                                tp2 = current_price + (2.5 * sl_dist)
+                                print(f"   ⚠️ TP düzeltildi (LONG): TP1=${tp1:.2f}")
+                            elif trend == 'bearish' and tp1 >= current_price:
+                                sl_dist = sl - current_price
+                                tp1 = current_price - (1.5 * sl_dist)
+                                tp2 = current_price - (2.5 * sl_dist)
+                                print(f"   ⚠️ TP düzeltildi (SHORT): TP1=${tp1:.2f}")
+                            print(f"   ✅ POZİSYON AÇILIYOR — {pattern_name} {trend.upper()} @ ${current_price:.2f}, SL=${sl:.2f}, TP1=${tp1:.2f}, Lot: {lot}")
                             _active_positions.append({
                                 'trend': trend, 'signal': sig_type,
                                 'entry': current_price, 'sl': round(sl, 2),
@@ -3494,7 +3527,23 @@ def build_response_payload(interval='1min'):
 
                     if should_open:
                         _pattern_label = 'BASİT' if confidence == 'BASİT' else 'COMPOSITE'
-                        print(f"   ✅ POZİSYON AÇILIYOR — {_pattern_label} {trend} @ ${current_price:.2f}")
+                        # SL DOĞRULAMA: LONG=SL altında, SHORT=SL üstünde
+                        if trend == 'bullish' and sl >= current_price:
+                            sl = current_price - (1.5 * atr_val)
+                            print(f"   ⚠️ SL düzeltildi (LONG): ${sl:.2f}")
+                        elif trend == 'bearish' and sl <= current_price:
+                            sl = current_price + (1.5 * atr_val)
+                            print(f"   ⚠️ SL düzeltildi (SHORT): ${sl:.2f}")
+                        # TP DOĞRULAMA
+                        if trend == 'bullish' and tp1 <= current_price:
+                            sl_dist = current_price - sl
+                            tp1 = current_price + (1.5 * sl_dist)
+                            tp2 = current_price + (2.5 * sl_dist)
+                        elif trend == 'bearish' and tp1 >= current_price:
+                            sl_dist = sl - current_price
+                            tp1 = current_price - (1.5 * sl_dist)
+                            tp2 = current_price - (2.5 * sl_dist)
+                        print(f"   ✅ POZİSYON AÇILIYOR — {_pattern_label} {trend} @ ${current_price:.2f}, SL=${sl:.2f}, TP1=${tp1:.2f}")
                         _active_positions.append({
                             'trend': trend, 'signal': sig_type,
                             'entry': current_price, 'sl': round(sl, 2),
@@ -3646,7 +3695,7 @@ def background_scanner():
         except Exception as e:
             print(f"Scanner Hatası #{_scan_count}: {e}")
             traceback.print_exc()
-        time.sleep(60)  # 60sn — API tasarrufu (free plan: 800/gün)
+        time.sleep(55)  # 55sn döngü — gold cache 120sn, her 2 döngüde 1 yeni veri
 
 threading.Thread(target=background_scanner, daemon=True).start()
 
