@@ -251,9 +251,9 @@ _dxy_cache  = {'df': pd.DataFrame(), 'sym': '', 'ts': 0}
 _htf_cache  = {'df': pd.DataFrame(), 'ts': 0}  # 15dk HTF cache
 _cache_lock = threading.Lock()
 
-GOLD_TTL = {'1min': 90, '5min': 300, '15min': 900, '1h': 3600}
-DXY_TTL  = 900   # DXY 15dk cache — yavaş değişir
-HTF_TTL  = 600   # 15dk cache 10 dakika — yavaş değişir
+GOLD_TTL = {'1min': 150, '5min': 600, '15min': 900, '1h': 3600}
+DXY_TTL  = 1800  # DXY 30dk cache — çok yavaş değişir, API tasarrufu
+HTF_TTL  = 1800  # 15dk cache 30 dakika — API tasarrufu
 
 # ─────────────────────────────────────────
 # AKTİF POZİSYON TAKİBİ
@@ -1386,27 +1386,19 @@ def get_htf_data():
 
 # 5dk cache — orta vadeli momentum onayı
 _mtf_cache = {'df': pd.DataFrame(), 'ts': 0}
-MTF_TTL = 600  # 5dk cache 10 dakika — API tasarrufu
+MTF_TTL = 900  # 5dk cache 15 dakika — API tasarrufu
 
 # 5dk Pattern Detection Cache — v5.7 pattern strategy her zaman 5dk veri kullanır
 _pattern_cache = {'df': pd.DataFrame(), 'ts': 0}
-PATTERN_CACHE_TTL = 600  # 10 dakika cache — API tasarrufu
+PATTERN_CACHE_TTL = 900  # 15 dakika cache — API tasarrufu (MTF ile aynı veriyi kullanır)
 
 def get_mtf_data():
-    """5 dakikalık veriyi çeker — Momentum onayı için."""
-    global _mtf_cache
-    with _cache_lock:
-        if not _mtf_cache['df'].empty and (time.time() - _mtf_cache['ts']) < MTF_TTL:
-            return _mtf_cache['df']
-    df = fetch_timeseries(GOLD_SYMBOL, '5min', 60)
-    if not df.empty:
-        df = calculate_indicators(df.copy())
-        with _cache_lock:
-            _mtf_cache = {'df': df, 'ts': time.time()}
-    return df
+    """5 dakikalık veriyi çeker — Momentum onayı + Pattern detection ortak cache."""
+    # Pattern cache ile aynı veriyi kullan — API tasarrufu
+    return get_pattern_data()
 
 def get_pattern_data():
-    """5dk veriyi çeker — v5.7 Pattern detection için (her zaman 5dk!)"""
+    """5dk veriyi çeker — v5.7 Pattern detection + MTF ortak cache (tek API çağrısı)"""
     global _pattern_cache
     with _cache_lock:
         if not _pattern_cache['df'].empty and (time.time() - _pattern_cache['ts']) < PATTERN_CACHE_TTL:
@@ -3621,7 +3613,7 @@ def build_response_payload(interval='1min'):
             }
         }
     except Exception as e:
-        print(f"Payload Build Hatası: {e}")
+        print(f"❌❌❌ PAYLOAD BUILD HATASI: {e}")
         traceback.print_exc()
         return None
 
