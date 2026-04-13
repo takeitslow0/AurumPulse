@@ -2021,8 +2021,344 @@ def detect_symmetric_triangle(swing_highs, swing_lows, current_price, atr, idx):
     return None
 
 
+def detect_triple_top(swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Üçlü Tepe: 3 benzer yükseklikte tepe + destek kırılımı → SHORT
+    Double Top'un güçlenmiş versiyonu — daha güvenilir
+    """
+    if len(swing_highs) < 3 or len(swing_lows) < 2:
+        return None
+
+    for i in range(len(swing_highs) - 1, 2, -1):
+        h3_idx, h3 = swing_highs[i]
+        h2_idx, h2 = swing_highs[i - 1]
+        h1_idx, h1 = swing_highs[i - 2]
+
+        # 3 tepe benzer yükseklikte mi?
+        tolerance = PATTERN_CONFIG['double_tolerance_pct'] * atr * 1.5
+        avg_h = (h1 + h2 + h3) / 3
+        if abs(h1 - avg_h) > tolerance or abs(h2 - avg_h) > tolerance or abs(h3 - avg_h) > tolerance:
+            continue
+
+        span = h3_idx - h1_idx
+        if span < 10 or span > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        # Dipler arası destek çizgisi
+        mid_lows = [l for l in swing_lows if h1_idx < l[0] < h3_idx]
+        if len(mid_lows) < 1:
+            continue
+        support = min(l[1] for l in mid_lows)
+
+        if current_price < support:
+            pattern_height = avg_h - support
+            return {
+                'pattern': 'TRIPLE_TOP',
+                'direction': 'SHORT',
+                'neckline': support,
+                'height': pattern_height,
+                'confidence': 85,
+            }
+
+    return None
+
+
+def detect_triple_bottom(swing_lows, swing_highs, current_price, atr, idx):
+    """
+    Üçlü Dip: 3 benzer derinlikte dip + direnç kırılımı → LONG
+    Double Bottom'ın güçlenmiş versiyonu — daha güvenilir
+    """
+    if len(swing_lows) < 3 or len(swing_highs) < 2:
+        return None
+
+    for i in range(len(swing_lows) - 1, 2, -1):
+        l3_idx, l3 = swing_lows[i]
+        l2_idx, l2 = swing_lows[i - 1]
+        l1_idx, l1 = swing_lows[i - 2]
+
+        tolerance = PATTERN_CONFIG['double_tolerance_pct'] * atr * 1.5
+        avg_l = (l1 + l2 + l3) / 3
+        if abs(l1 - avg_l) > tolerance or abs(l2 - avg_l) > tolerance or abs(l3 - avg_l) > tolerance:
+            continue
+
+        span = l3_idx - l1_idx
+        if span < 10 or span > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        mid_highs = [h for h in swing_highs if l1_idx < h[0] < l3_idx]
+        if len(mid_highs) < 1:
+            continue
+        resistance = max(h[1] for h in mid_highs)
+
+        if current_price > resistance:
+            pattern_height = resistance - avg_l
+            return {
+                'pattern': 'TRIPLE_BOTTOM',
+                'direction': 'LONG',
+                'neckline': resistance,
+                'height': pattern_height,
+                'confidence': 86,
+            }
+
+    return None
+
+
+def detect_cup_and_handle(df, swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Fincan ve Kulp: U şeklinde dip (cup) + küçük düzeltme (handle) → LONG
+    Güçlü yükseliş formasyonu — yüksek güvenilirlik
+    """
+    if len(swing_lows) < 2 or len(swing_highs) < 2:
+        return None
+
+    # Cup: İki yüksek tepe + arada derin dip
+    for i in range(len(swing_highs) - 1, 0, -1):
+        rh_idx, rh = swing_highs[i]     # Sağ kenar (cup rim)
+        lh_idx, lh = swing_highs[i - 1]  # Sol kenar (cup rim)
+
+        # İki kenar benzer yükseklikte
+        tolerance = PATTERN_CONFIG['double_tolerance_pct'] * atr * 2
+        if abs(lh - rh) > tolerance:
+            continue
+
+        span = rh_idx - lh_idx
+        if span < 12 or span > PATTERN_CONFIG['pattern_lookback']:
+            continue
+
+        # Cup dibi: iki kenar arasındaki en düşük nokta
+        cup_lows = [l for l in swing_lows if lh_idx < l[0] < rh_idx]
+        if not cup_lows:
+            continue
+        cup_bottom_idx, cup_bottom = min(cup_lows, key=lambda x: x[1])
+
+        # Cup derinliği yeterli mi? (en az 1 ATR)
+        cup_depth = min(lh, rh) - cup_bottom
+        if cup_depth < atr:
+            continue
+
+        # U şekli kontrolü: dip ortaya yakın mı?
+        mid_point = (lh_idx + rh_idx) / 2
+        if abs(cup_bottom_idx - mid_point) > span * 0.35:
+            continue  # Asimetrik — cup değil
+
+        # Handle: sağ kenardan sonra küçük düzeltme
+        rim = min(lh, rh)
+        handle_low = current_price  # Şu anki fiyat handle'ın dibi olabilir
+        handle_depth = rh - current_price
+        # Handle, cup derinliğinin %50'sinden fazla düşmemeli
+        if handle_depth > cup_depth * 0.5:
+            continue
+        # Handle mevcut mu? (fiyat rim'in biraz altında veya üstünde)
+        if current_price < rim - cup_depth * 0.5:
+            continue
+
+        # Kırılım: fiyat rim'i geçti mi?
+        if current_price > rim:
+            return {
+                'pattern': 'CUP_HANDLE',
+                'direction': 'LONG',
+                'neckline': rim,
+                'height': cup_depth,
+                'confidence': 78,
+            }
+
+    return None
+
+
+def detect_channel(df, swing_highs, swing_lows, current_price, atr, idx):
+    """
+    Kanal: Paralel üst ve alt çizgiler arasında hareket
+    - Channel Up: yükselen kanal → alt çizgiden LONG veya üst kırılımda LONG
+    - Channel Down: düşen kanal → üst çizgiden SHORT veya alt kırılımda SHORT
+    En az 2 high + 2 low gerekli
+    """
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
+
+    sh1_idx, sh1 = swing_highs[-2]
+    sh2_idx, sh2 = swing_highs[-1]
+    sl1_idx, sl1 = swing_lows[-2]
+    sl2_idx, sl2 = swing_lows[-1]
+
+    # Min span
+    span = max(sh2_idx, sl2_idx) - min(sh1_idx, sl1_idx)
+    if span < 10 or span > PATTERN_CONFIG['pattern_lookback']:
+        return None
+
+    # Üst ve alt çizgi eğimleri
+    if sh2_idx == sh1_idx or sl2_idx == sl1_idx:
+        return None
+    upper_slope = (sh2 - sh1) / (sh2_idx - sh1_idx)
+    lower_slope = (sl2 - sl1) / (sl2_idx - sl1_idx)
+
+    # Paralel kontrol: eğimler benzer olmalı
+    slope_diff = abs(upper_slope - lower_slope)
+    avg_slope = (abs(upper_slope) + abs(lower_slope)) / 2
+    if avg_slope > 0 and slope_diff > avg_slope * 1.5:
+        return None  # Çok farklı eğimler — kanal değil
+
+    # Kanal genişliği
+    channel_width = ((sh1 - sl1) + (sh2 - sl2)) / 2
+    if channel_width < 0.5 * atr:
+        return None  # Çok dar
+
+    avg_slope_val = (upper_slope + lower_slope) / 2
+
+    # Mevcut trend çizgileri (extrapolate)
+    upper_now = sh2 + upper_slope * (idx - sh2_idx)
+    lower_now = sl2 + lower_slope * (idx - sl2_idx)
+
+    if avg_slope_val > 0.01:
+        # Yükselen kanal — alt çizgiye yakınsa LONG
+        dist_to_lower = current_price - lower_now
+        if dist_to_lower < channel_width * 0.25:
+            return {
+                'pattern': 'CHANNEL_UP',
+                'direction': 'LONG',
+                'neckline': lower_now,
+                'height': channel_width,
+                'confidence': 64,
+            }
+    elif avg_slope_val < -0.01:
+        # Düşen kanal — üst çizgiye yakınsa SHORT
+        dist_to_upper = upper_now - current_price
+        if dist_to_upper < channel_width * 0.25:
+            return {
+                'pattern': 'CHANNEL_DOWN',
+                'direction': 'SHORT',
+                'neckline': upper_now,
+                'height': channel_width,
+                'confidence': 64,
+            }
+
+    return None
+
+
+def detect_rounding_bottom(df, swing_lows, current_price, atr, idx):
+    """
+    Yuvarlak Dip (Çanak): Kademeli düşüş + yuvarlak dip + kademeli yükseliş → LONG
+    Uzun vadeli dönüş formasyonu — yüksek güvenilirlik
+    """
+    if len(swing_lows) < 3:
+        return None
+
+    # Son 3+ dip noktasının U şekli oluşturup oluşturmadığını kontrol et
+    recent_lows = swing_lows[-4:] if len(swing_lows) >= 4 else swing_lows[-3:]
+
+    span = recent_lows[-1][0] - recent_lows[0][0]
+    if span < 15 or span > PATTERN_CONFIG['pattern_lookback']:
+        return None
+
+    # Ortadaki dipler kenardakilerden düşük mü? (U şekli)
+    prices = [l[1] for l in recent_lows]
+    min_price = min(prices)
+    min_idx_in_list = prices.index(min_price)
+
+    # Min kenarlardan biriyse U şekli yok
+    if min_idx_in_list == 0 or min_idx_in_list == len(prices) - 1:
+        return None
+
+    # Sol ve sağ kenarlar ortadan yüksek mi?
+    left_avg = sum(prices[:min_idx_in_list]) / max(1, min_idx_in_list)
+    right_avg = sum(prices[min_idx_in_list + 1:]) / max(1, len(prices) - min_idx_in_list - 1)
+
+    if left_avg <= min_price or right_avg <= min_price:
+        return None
+
+    # Yuvarlama derinliği yeterli mi?
+    rim = max(left_avg, right_avg)
+    depth = rim - min_price
+    if depth < atr:
+        return None
+
+    # Fiyat rim seviyesini geçti mi?
+    if current_price > rim:
+        return {
+            'pattern': 'ROUNDING_BOTTOM',
+            'direction': 'LONG',
+            'neckline': rim,
+            'height': depth,
+            'confidence': 70,
+        }
+
+    return None
+
+
+def detect_pennant(df, idx, atr):
+    """
+    Flama (Pennant): Güçlü hareket (pole) + daralan simetrik konsolidasyon
+    Bull Pennant: yukarı pole + daralan yapı → LONG
+    Bear Pennant: aşağı pole + daralan yapı → SHORT
+    Flag'e benzer ama üçgen konsolidasyon
+    """
+    if idx < 30:
+        return None
+
+    close_vals = df['close'].values
+    high_vals = df['high'].values
+    low_vals = df['low'].values
+
+    # Konsolidasyon bölgesi (son 8-15 bar)
+    consol_len = min(15, idx - 15)
+    if consol_len < 8:
+        return None
+
+    consol_start = idx - consol_len
+    consol_highs = high_vals[consol_start:idx + 1]
+    consol_lows = low_vals[consol_start:idx + 1]
+
+    # Daralan yapı: ilk yarı range > ikinci yarı range
+    half = len(consol_highs) // 2
+    first_range = max(consol_highs[:half]) - min(consol_lows[:half])
+    second_range = max(consol_highs[half:]) - min(consol_lows[half:])
+
+    if second_range >= first_range * 0.85:
+        return None  # Daralma yok
+
+    # Pole: konsolidasyondan önceki güçlü hareket
+    pole_start = max(0, consol_start - 15)
+    pole_end = consol_start
+    if pole_end <= pole_start:
+        return None
+
+    pole_move = float(close_vals[pole_end]) - float(close_vals[pole_start])
+    pole_abs = abs(pole_move)
+
+    if pole_abs < PATTERN_CONFIG['flag_min_pole_atr'] * atr:
+        return None
+
+    current_price = float(close_vals[idx])
+
+    if pole_move > 0:
+        # Bull Pennant: kırılım yukarı mı?
+        consol_high = max(consol_highs)
+        if current_price > consol_high:
+            return {
+                'pattern': 'BULL_PENNANT',
+                'direction': 'LONG',
+                'neckline': consol_high,
+                'height': pole_abs,
+                'confidence': 70,
+                'pole_move': pole_move,
+            }
+    else:
+        # Bear Pennant
+        consol_low = min(consol_lows)
+        if current_price < consol_low:
+            return {
+                'pattern': 'BEAR_PENNANT',
+                'direction': 'SHORT',
+                'neckline': consol_low,
+                'height': pole_abs,
+                'confidence': 70,
+                'pole_move': pole_move,
+            }
+
+    return None
+
+
 def detect_patterns(df, idx, atr):
-    """Tüm kalıpları tara, en güvenilir olanı döndür — 11 pattern"""
+    """Tüm kalıpları tara, en güvenilir olanı döndür — 18 pattern"""
     swing_highs, swing_lows = find_swings(df, idx, PATTERN_CONFIG['pattern_lookback'])
     current_price = float(df.iloc[idx]['close'])
 
@@ -2075,6 +2411,36 @@ def detect_patterns(df, idx, atr):
 
     # Symmetric Triangle (v6.0)
     p = detect_symmetric_triangle(swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Triple Top (v6.1)
+    p = detect_triple_top(swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Triple Bottom (v6.1)
+    p = detect_triple_bottom(swing_lows, swing_highs, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Cup & Handle (v6.1)
+    p = detect_cup_and_handle(df, swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Channel Up/Down (v6.1)
+    p = detect_channel(df, swing_highs, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Rounding Bottom (v6.1)
+    p = detect_rounding_bottom(df, swing_lows, current_price, atr, idx)
+    if p:
+        patterns_found.append(p)
+
+    # Pennant (v6.1)
+    p = detect_pennant(df, idx, atr)
     if p:
         patterns_found.append(p)
 
