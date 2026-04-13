@@ -6,9 +6,11 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import time
+import json as _json
 from datetime import datetime, timezone, timedelta
 import feedparser
 import traceback
+import websocket as _ws_client
 from database import init_db, save_market_data, get_recent_history, save_trade, load_all_trades
 
 import os
@@ -3140,6 +3142,9 @@ def build_response_payload(interval='1min'):
 
         dxy_price = safe_float(dxy_df['close'].iloc[-1], 0.0, 4) if not dxy_df.empty else 0.0
         current_price = safe_float(last.get('close'), 0.0, 2)
+        # WS'den daha güncel fiyat varsa kullan (pozisyon yönetimi için daha doğru)
+        if _live_price['price'] > 0 and (time.time() * 1000 - _live_price['ts']) < 30000:
+            current_price = round(_live_price['price'], 2)
         current_vol = safe_float(last.get('volume'), 0.0, 2)
         if current_vol == 0:
             current_vol = safe_float(
@@ -3695,9 +3700,78 @@ def background_scanner():
         except Exception as e:
             print(f"Scanner Hatası #{_scan_count}: {e}")
             traceback.print_exc()
-        time.sleep(55)  # 55sn döngü — gold cache 120sn, her 2 döngüde 1 yeni veri
+        time.sleep(60)  # 60sn döngü — indikatör/sinyal hesabı (fiyat WS'den geliyor)
 
 threading.Thread(target=background_scanner, daemon=True).start()
+
+# ─────────────────────────────────────────
+# TWELVEDATA WEBSOCKET — CANLI FİYAT AKIŞI
+# REST API limitini KULLANMAZ — saniye bazlı fiyat güncellemesi
+# ─────────────────────────────────────────
+_live_price = {'price': 0, 'ts': 0}
+
+def _td_ws_stream():
+    """TwelveData WebSocket ile saniye bazlı XAU/USD fiyat akışı"""
+    _retry = 0
+    while True:
+        try:
+            ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={TD_API_KEY}"
+            print(f"🔌 TwelveData WS bağlanıyor... (deneme #{_retry+1})")
+
+            def on_open(ws):
+                nonlocal _retry
+                _retry = 0
+                sub = {"action": "subscribe", "params": {"symbols": "XAU/USD"}}
+                ws.send(_json.dumps(sub))
+                print("✅ TwelveData WS bağlandı — XAU/USD akışı başladı")
+
+            def on_message(ws, message):
+                try:
+                    data = _json.loads(message)
+                    if 'price' in data:
+                        price = float(data['price'])
+                        _live_price['price'] = price
+                        _live_price['ts'] = int(time.time() * 1000)
+                        # Frontend'e push
+                        socketio.emit('price_tick', {
+                            'price': price,
+                            'timestamp': _live_price['ts'],
+                            'active_positions': [
+                                {
+                                    'trend': p['trend'], 'entry': p['entry'],
+                                    'sl': p['sl'], 'tp1': p['tp1'], 'tp2': p['tp2'],
+                                    'lot': p.get('lot', 0.01), 'pattern': p.get('pattern', '')
+                                } for p in _active_positions
+                            ]
+                        })
+                    elif data.get('event') == 'subscribe-status':
+                        print(f"   📡 WS subscribe: {data.get('status', '?')}")
+                except Exception as e:
+                    pass  # JSON parse hataları — sessizce geç
+
+            def on_error(ws, error):
+                print(f"⚠️ TwelveData WS hata: {error}")
+
+            def on_close(ws, close_status, close_msg):
+                print(f"🔌 TwelveData WS kapandı: {close_status} {close_msg}")
+
+            ws = _ws_client.WebSocketApp(
+                ws_url,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            ws.run_forever(ping_interval=30, ping_timeout=10)
+        except Exception as e:
+            print(f"❌ TwelveData WS bağlantı hatası: {e}")
+
+        _retry += 1
+        wait = min(5 * (2 ** _retry), 120)  # Exponential backoff: 10s, 20s, 40s... max 120s
+        print(f"🔄 TwelveData WS yeniden bağlanacak: {wait}sn sonra")
+        time.sleep(wait)
+
+threading.Thread(target=_td_ws_stream, daemon=True).start()
 
 # ─────────────────────────────────────────
 # OLAY ÖNCESİ TELEGRAM UYARI SİSTEMİ
