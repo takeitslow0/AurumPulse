@@ -251,9 +251,9 @@ _dxy_cache  = {'df': pd.DataFrame(), 'sym': '', 'ts': 0}
 _htf_cache  = {'df': pd.DataFrame(), 'ts': 0}  # 15dk HTF cache
 _cache_lock = threading.Lock()
 
-GOLD_TTL = {'1min': 50, '5min': 280, '15min': 880, '1h': 3580}
-DXY_TTL  = 600   # DXY 10dk cache — yavaş değişir
-HTF_TTL  = 300   # 15dk cache 5 dakika — yavaş değişir
+GOLD_TTL = {'1min': 90, '5min': 300, '15min': 900, '1h': 3600}
+DXY_TTL  = 900   # DXY 15dk cache — yavaş değişir
+HTF_TTL  = 600   # 15dk cache 10 dakika — yavaş değişir
 
 # ─────────────────────────────────────────
 # AKTİF POZİSYON TAKİBİ
@@ -1386,11 +1386,11 @@ def get_htf_data():
 
 # 5dk cache — orta vadeli momentum onayı
 _mtf_cache = {'df': pd.DataFrame(), 'ts': 0}
-MTF_TTL = 240  # 5dk cache 4 dakika — kalite filtresi için yeterli
+MTF_TTL = 600  # 5dk cache 10 dakika — API tasarrufu
 
 # 5dk Pattern Detection Cache — v5.7 pattern strategy her zaman 5dk veri kullanır
 _pattern_cache = {'df': pd.DataFrame(), 'ts': 0}
-PATTERN_CACHE_TTL = 240  # 4 dakika cache
+PATTERN_CACHE_TTL = 600  # 10 dakika cache — API tasarrufu
 
 def get_mtf_data():
     """5 dakikalık veriyi çeker — Momentum onayı için."""
@@ -3627,32 +3627,31 @@ def build_response_payload(interval='1min'):
 # ─────────────────────────────────────────
 def background_scanner():
     time.sleep(5)
+    _scan_count = 0
     while True:
         t0 = time.time()
+        _scan_count += 1
         try:
-            with _cache_lock:
-                _gold_cache.pop('1min', None)
-            gold_df_raw, dxy_df, _ = fetch_market_data('1min')
-            if not gold_df_raw.empty:
-                gold_df = calculate_indicators(gold_df_raw.copy())
-                price = safe_float(gold_df['close'].iloc[-1])
-                rsi = safe_float(gold_df['RSI'].iloc[-1], 50.0)
-                dxy = safe_float(dxy_df['close'].iloc[-1], 0.0, 4) if not dxy_df.empty else 0.0
-                save_market_data(price, rsi, dxy)
-                payload = build_response_payload('1min')
-                if payload:
-                    socketio.emit('market_update', payload)
-                    # Sinyal durumu log
-                    ts = payload.get('trading_signals', {})
-                    ap = len(_active_positions)
-                    print(f"   📊 Sinyal: {ts.get('trend','?')} | Conf: {ts.get('pattern','?')} | Aktif Poz: {ap}/3 | RSI: {rsi:.1f}")
+            # Cache'i temizleme — TTL'e güven, gereksiz API çağrısı yapma
+            payload = build_response_payload('1min')
+            if payload:
+                socketio.emit('market_update', payload)
+                price = payload.get('gold_price', 0)
+                rsi = payload.get('gold_rsi', 50)
+                dxy = payload.get('dxy_price', 0)
+                if price > 0:
+                    save_market_data(price, rsi, dxy)
+                ts = payload.get('trading_signals', {})
+                ap = len(_active_positions)
+                print(f"   📊 [{_scan_count}] Sinyal: {ts.get('trend','?')} | Conf: {ts.get('pattern','?')} | Aktif Poz: {ap}/3 | RSI: {rsi:.1f}")
             else:
-                print(f"   ⚠️ Altın verisi boş geldi — API hatası olabilir")
+                print(f"   ⚠️ [{_scan_count}] Payload boş — API hatası olabilir")
             elapsed = time.time() - t0
-            print(f"⚡ Scan tamamlandı: {elapsed:.1f}sn")
+            print(f"⚡ Scan #{_scan_count} tamamlandı: {elapsed:.1f}sn")
         except Exception as e:
-            print(f"Scanner Hatası: {e}")
-        time.sleep(30)  # 60sn → 30sn daha hızlı güncelleme
+            print(f"Scanner Hatası #{_scan_count}: {e}")
+            traceback.print_exc()
+        time.sleep(60)  # 60sn — API tasarrufu (free plan: 800/gün)
 
 threading.Thread(target=background_scanner, daemon=True).start()
 
