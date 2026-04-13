@@ -3171,6 +3171,8 @@ def build_response_payload(interval='1min'):
         quality_reasons = []
         global _active_positions
 
+        print(f"🔎 SİNYAL MOTORU: aktif_poz={len(_active_positions)}, kill={kill_switch_status.get('active',False)}, price=${current_price:.2f}, rsi={rsi_val:.1f}, macd_h={macd_h:.4f}")
+
         if kill_switch_status.get('active', False):
             # Close ALL active positions
             for pos in _active_positions:
@@ -3314,8 +3316,8 @@ def build_response_payload(interval='1min'):
             if len(_active_positions) < MAX_SIMULTANEOUS:
                 # Try pattern detection first (v5.7)
                 pattern_signal = generate_pattern_signal(current_price, atr_val, ACCOUNT_CONFIG['balance'])
+                print(f"   🔍 Pattern sonucu: {'BULUNDU' if pattern_signal else 'YOK'}")
 
-                # Fallback to composite signal if no pattern found
                 if pattern_signal:
                     trend = pattern_signal.get('direction', 'nötr')
                     if trend == 'LONG':
@@ -3382,148 +3384,138 @@ def build_response_payload(interval='1min'):
                                 trend, current_price, round(sl, 2), round(tp1, 2), round(tp2, 2),
                                 f"{confidence}%", quality_score, quality_reasons, _temp_risk, analysis
                             )
-            else:
-                # Fallback: Use composite signal
-                trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
-                    gold_df, mas, current_price, atr_val,
-                    macd_v, macd_s, macd_h, rsi_val, vwap_val
-                )
 
-                # Check: don't open 2 positions with same trend
-                same_trend_exists = any(p['trend'] == trend for p in _active_positions)
-
-                # Kalite filtresi ile pozisyon aç
-                should_open = False
-                quality_score = 0
-                quality_reasons = []
-
-                # Debug loglama
-                print(f"📊 Sinyal: trend={trend}, confidence={confidence}, price=${current_price:.2f}")
-
-                if same_trend_exists:
-                    print(f"   ⚠️ Aynı yöne ({trend}) zaten açık pozisyon var — sinyal açılmadı")
-                elif confidence == "GÜÇLÜ" and trend in ("bullish", "bearish"):
-                    quality_score, quality_reasons = calculate_signal_quality(
-                        gold_df, current_price, trend, atr_val, rsi_val, vwap_val, bb_m, 50
+                # ── PATTERN BULUNAMADIYSA → COMPOSITE + BASİT FALLBACK ──
+                if not pattern_signal:
+                    print(f"   📊 Pattern yok → Composite/BASİT fallback deneniyor...")
+                    trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
+                        gold_df, mas, current_price, atr_val,
+                        macd_v, macd_s, macd_h, rsi_val, vwap_val
                     )
-                    print(f"   GÜÇLÜ sinyal kalite: {quality_score}/9 (min: {MIN_QUALITY_GUCLU}) -> {'AÇILACAK' if quality_score >= MIN_QUALITY_GUCLU else 'FİLTRELENDİ'}")
-                    if quality_score >= MIN_QUALITY_GUCLU:
-                        should_open = True
 
-                elif confidence == "ORTA" and trend in ("bullish", "bearish"):
-                    quality_score, quality_reasons = calculate_signal_quality(
-                        gold_df, current_price, trend, atr_val, rsi_val, vwap_val, bb_m, 50
-                    )
-                    print(f"   ORTA sinyal kalite: {quality_score}/9 (min: {MIN_QUALITY_ORTA}) -> {'AÇILACAK' if quality_score >= MIN_QUALITY_ORTA else 'FİLTRELENDİ'}")
-                    if quality_score >= MIN_QUALITY_ORTA:
-                        should_open = True
+                    # Check: don't open 2 positions with same trend
+                    same_trend_exists = any(p['trend'] == trend for p in _active_positions)
 
-                elif confidence == "ZAYIF" and trend in ("bullish", "bearish"):
-                    # SİMÜLASYON: Zayıf sinyallerde minimum lotla aç (performans testi için)
-                    quality_score, quality_reasons = calculate_signal_quality(
-                        gold_df, current_price, trend, atr_val, rsi_val, vwap_val, bb_m, 50
-                    )
-                    print(f"   ZAYIF sinyal kalite: {quality_score}/9 → SİMÜLASYON TRADE (min lot)")
-                    should_open = True
-                    quality_reasons.append('SİMÜLASYON-ZAYIF')
-                elif confidence == "YOK" and trend == "nötr":
-                    # ── BASİT SİNYAL FALLBACK — RSI + MACD + VWAP + MA20 + BB ile trade aç ──
-                    simple_bull = 0
-                    simple_bear = 0
-                    # MACD histogram yönü (en güçlü gösterge)
-                    if macd_h > 0: simple_bull += 1
-                    elif macd_h < 0: simple_bear += 1
-                    # MACD çizgi kesişimi
-                    if macd_v > macd_s: simple_bull += 1
-                    elif macd_v < macd_s: simple_bear += 1
-                    # RSI momentum (geniş bant)
-                    if rsi_val > 52: simple_bull += 1
-                    elif rsi_val < 48: simple_bear += 1
-                    # VWAP pozisyonu
-                    if vwap_val > 0:
-                        if current_price > vwap_val: simple_bull += 1
-                        elif current_price < vwap_val: simple_bear += 1
-                    # MA20 yönü
-                    if ma20_val > 0:
-                        if current_price > ma20_val: simple_bull += 1
-                        elif current_price < ma20_val: simple_bear += 1
-                    # Bollinger Band pozisyonu
-                    if bb_m > 0:
-                        if current_price > bb_m: simple_bull += 1
-                        elif current_price < bb_m: simple_bear += 1
+                    # Kalite filtresi ile pozisyon aç
+                    should_open = False
+                    quality_score = 0
+                    quality_reasons = []
 
-                    net_bull = simple_bull - simple_bear
-                    net_bear = simple_bear - simple_bull
+                    # Debug loglama
+                    print(f"   📊 Composite sonuç: trend={trend}, confidence={confidence}")
 
-                    if net_bull >= 2 and rsi_val < 68 and rsi_val > 30:
-                        trend = "bullish"
-                        confidence = "BASİT"
-                        sig_type = f"📈 BASİT LONG — Teknik Hizalama ({simple_bull}/{simple_bull+simple_bear}) 🟢"
-                        sl = current_price - (1.5 * atr_val)
-                        tp1 = current_price + (2.0 * atr_val)
-                        tp2 = current_price + (3.0 * atr_val)
+                    if same_trend_exists:
+                        print(f"   ⚠️ Aynı yöne ({trend}) zaten açık pozisyon var — sinyal açılmadı")
+                    elif confidence == "GÜÇLÜ" and trend in ("bullish", "bearish"):
+                        quality_score, quality_reasons = calculate_signal_quality(
+                            gold_df, current_price, trend, atr_val, rsi_val, vwap_val, bb_m, 50
+                        )
+                        print(f"   GÜÇLÜ sinyal kalite: {quality_score}/9 (min: {MIN_QUALITY_GUCLU}) -> {'AÇILACAK' if quality_score >= MIN_QUALITY_GUCLU else 'FİLTRELENDİ'}")
+                        if quality_score >= MIN_QUALITY_GUCLU:
+                            should_open = True
+
+                    elif confidence == "ORTA" and trend in ("bullish", "bearish"):
+                        quality_score, quality_reasons = calculate_signal_quality(
+                            gold_df, current_price, trend, atr_val, rsi_val, vwap_val, bb_m, 50
+                        )
+                        print(f"   ORTA sinyal kalite: {quality_score}/9 (min: {MIN_QUALITY_ORTA}) -> {'AÇILACAK' if quality_score >= MIN_QUALITY_ORTA else 'FİLTRELENDİ'}")
+                        if quality_score >= MIN_QUALITY_ORTA:
+                            should_open = True
+
+                    elif confidence == "ZAYIF" and trend in ("bullish", "bearish"):
+                        quality_score, quality_reasons = calculate_signal_quality(
+                            gold_df, current_price, trend, atr_val, rsi_val, vwap_val, bb_m, 50
+                        )
+                        print(f"   ZAYIF sinyal kalite: {quality_score}/9 → SİMÜLASYON TRADE (min lot)")
                         should_open = True
-                        quality_score = simple_bull
-                        quality_reasons = ['BASİT-LONG', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}', f'Net:+{net_bull}']
-                        print(f"   📈 BASİT LONG sinyal: bull={simple_bull}, bear={simple_bear}, net=+{net_bull}")
-                    elif net_bear >= 2 and rsi_val > 32 and rsi_val < 70:
-                        trend = "bearish"
-                        confidence = "BASİT"
-                        sig_type = f"📉 BASİT SHORT — Teknik Hizalama ({simple_bear}/{simple_bull+simple_bear}) 🔴"
-                        sl = current_price + (1.5 * atr_val)
-                        tp1 = current_price - (2.0 * atr_val)
-                        tp2 = current_price - (3.0 * atr_val)
-                        should_open = True
-                        quality_score = simple_bear
-                        quality_reasons = ['BASİT-SHORT', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}', f'Net:-{net_bear}']
-                        print(f"   📉 BASİT SHORT sinyal: bull={simple_bull}, bear={simple_bear}, net=-{net_bear}")
+                        quality_reasons.append('SİMÜLASYON-ZAYIF')
+                    elif confidence == "YOK" and trend == "nötr":
+                        # ── BASİT SİNYAL FALLBACK ──
+                        simple_bull = 0
+                        simple_bear = 0
+                        if macd_h > 0: simple_bull += 1
+                        elif macd_h < 0: simple_bear += 1
+                        if macd_v > macd_s: simple_bull += 1
+                        elif macd_v < macd_s: simple_bear += 1
+                        if rsi_val > 52: simple_bull += 1
+                        elif rsi_val < 48: simple_bear += 1
+                        if vwap_val > 0:
+                            if current_price > vwap_val: simple_bull += 1
+                            elif current_price < vwap_val: simple_bear += 1
+                        if ma20_val > 0:
+                            if current_price > ma20_val: simple_bull += 1
+                            elif current_price < ma20_val: simple_bear += 1
+                        if bb_m > 0:
+                            if current_price > bb_m: simple_bull += 1
+                            elif current_price < bb_m: simple_bear += 1
+
+                        net_bull = simple_bull - simple_bear
+                        net_bear = simple_bear - simple_bull
+
+                        if net_bull >= 2 and rsi_val < 68 and rsi_val > 30:
+                            trend = "bullish"
+                            confidence = "BASİT"
+                            sig_type = f"📈 BASİT LONG — Teknik Hizalama ({simple_bull}/{simple_bull+simple_bear}) 🟢"
+                            sl = current_price - (1.5 * atr_val)
+                            tp1 = current_price + (2.0 * atr_val)
+                            tp2 = current_price + (3.0 * atr_val)
+                            should_open = True
+                            quality_score = simple_bull
+                            quality_reasons = ['BASİT-LONG', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}', f'Net:+{net_bull}']
+                            print(f"   📈 BASİT LONG sinyal: bull={simple_bull}, bear={simple_bear}, net=+{net_bull}")
+                        elif net_bear >= 2 and rsi_val > 32 and rsi_val < 70:
+                            trend = "bearish"
+                            confidence = "BASİT"
+                            sig_type = f"📉 BASİT SHORT — Teknik Hizalama ({simple_bear}/{simple_bull+simple_bear}) 🔴"
+                            sl = current_price + (1.5 * atr_val)
+                            tp1 = current_price - (2.0 * atr_val)
+                            tp2 = current_price - (3.0 * atr_val)
+                            should_open = True
+                            quality_score = simple_bear
+                            quality_reasons = ['BASİT-SHORT', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}', f'Net:-{net_bear}']
+                            print(f"   📉 BASİT SHORT sinyal: bull={simple_bull}, bear={simple_bear}, net=-{net_bear}")
+                        else:
+                            print(f"   Sinyal açılmadı: BASİT filtre (bull={simple_bull}, bear={simple_bear}, net={net_bull})")
                     else:
-                        print(f"   Sinyal açılmadı: BASİT filtre (bull={simple_bull}, bear={simple_bear}, net={net_bull})")
-                else:
-                    print(f"   Sinyal açılmadı: confidence={confidence}, trend={trend}")
+                        print(f"   Sinyal açılmadı: confidence={confidence}, trend={trend}")
 
-                # MACD Histogram yön onayı — GÜÇLÜ/ORTA sinyallerde zorunlu, ZAYIF/BASİT'te skip
-                if should_open and confidence not in ("ZAYIF", "BASİT"):
-                    if trend == 'bullish' and macd_h <= 0:
-                        should_open = False
-                        print(f"   ❌ MACD onay başarısız: LONG sinyal ama MACD_H={macd_h:.4f} (negatif)")
-                    elif trend == 'bearish' and macd_h >= 0:
-                        should_open = False
-                        print(f"   ❌ MACD onay başarısız: SHORT sinyal ama MACD_H={macd_h:.4f} (pozitif)")
+                    # MACD Histogram yön onayı — GÜÇLÜ/ORTA sinyallerde zorunlu, ZAYIF/BASİT'te skip
+                    if should_open and confidence not in ("ZAYIF", "BASİT"):
+                        if trend == 'bullish' and macd_h <= 0:
+                            should_open = False
+                            print(f"   ❌ MACD onay başarısız: LONG sinyal ama MACD_H={macd_h:.4f} (negatif)")
+                        elif trend == 'bearish' and macd_h >= 0:
+                            should_open = False
+                            print(f"   ❌ MACD onay başarısız: SHORT sinyal ama MACD_H={macd_h:.4f} (pozitif)")
 
-                # v3.7 — MUM ONAY KALDIRILDI (v3.4'te 47→10 işleme düşürdü, zararlı)
-                # Candle confirmation devre dışı bırakıldı
+                    # v3.12: Günlük güvenlik kontrolü
+                    if should_open:
+                        can_trade, safety_msg = _can_open_trade()
+                        if not can_trade:
+                            should_open = False
+                            print(f"   {safety_msg}")
+                            analysis['daily_safety'] = safety_msg
 
-                # v3.12: Günlük güvenlik kontrolü
-                if should_open:
-                    can_trade, safety_msg = _can_open_trade()
-                    if not can_trade:
-                        should_open = False
-                        print(f"   {safety_msg}")
-                        # Güvenlik durumunu frontend'e bildir
-                        analysis['daily_safety'] = safety_msg
-
-                if should_open:
-                    _pattern_label = 'BASİT' if confidence == 'BASİT' else 'COMPOSITE'
-                    print(f"   ✅ POZİSYON AÇILIYOR — {_pattern_label} {trend} @ ${current_price:.2f}")
-                    _active_positions.append({
-                        'trend': trend, 'signal': sig_type,
-                        'entry': current_price, 'sl': round(sl, 2),
-                        'tp1': round(tp1, 2), 'tp2': round(tp2, 2), 'tp1_hit': False,
-                        'open_time': int(time.time()),
-                        'lot': ACCOUNT_CONFIG['min_lot'],
-                        'remaining_lot': ACCOUNT_CONFIG['min_lot'],
-                        'partial_done': False,
-                        'trailing_sl': sl,
-                        'pattern': _pattern_label,
-                        'dynamic_tp_dollars': TRADE_MGMT['tp_dollars'],
-                    })
-                    # Telegram'a sinyal gönder
-                    _temp_risk = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
-                    send_telegram_signal(
-                        trend, current_price, round(sl, 2), round(tp1, 2), round(tp2, 2),
-                        confidence, quality_score, quality_reasons, _temp_risk, analysis
-                    )
+                    if should_open:
+                        _pattern_label = 'BASİT' if confidence == 'BASİT' else 'COMPOSITE'
+                        print(f"   ✅ POZİSYON AÇILIYOR — {_pattern_label} {trend} @ ${current_price:.2f}")
+                        _active_positions.append({
+                            'trend': trend, 'signal': sig_type,
+                            'entry': current_price, 'sl': round(sl, 2),
+                            'tp1': round(tp1, 2), 'tp2': round(tp2, 2), 'tp1_hit': False,
+                            'open_time': int(time.time()),
+                            'lot': ACCOUNT_CONFIG['min_lot'],
+                            'remaining_lot': ACCOUNT_CONFIG['min_lot'],
+                            'partial_done': False,
+                            'trailing_sl': sl,
+                            'pattern': _pattern_label,
+                            'dynamic_tp_dollars': TRADE_MGMT['tp_dollars'],
+                        })
+                        _temp_risk = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
+                        send_telegram_signal(
+                            trend, current_price, round(sl, 2), round(tp1, 2), round(tp2, 2),
+                            confidence, quality_score, quality_reasons, _temp_risk, analysis
+                        )
 
         # ═══ RİSK METRİKLERİ HESAPLA ═══
         risk_metrics = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
@@ -4151,6 +4143,81 @@ def get_history():
         return jsonify({"records": safe_records, "count": len(safe_records)})
     except Exception as e:
         return jsonify({"error": f"Sunucu Hatası: {str(e)}"})
+
+@app.route('/api/debug_signal')
+def debug_signal():
+    """Sinyal motoru durumunu tarayıcıdan kontrol et — Railway log'a gerek kalmadan"""
+    try:
+        gold_df_raw, dxy_df, dxy_sym = fetch_market_data('1min')
+        if gold_df_raw.empty:
+            return jsonify({"error": "TwelveData veri yok", "gold_bars": 0})
+
+        gold_df = calculate_indicators(gold_df_raw.copy())
+        last = gold_df.iloc[-1]
+        current_price = safe_float(last.get('close'), 0.0, 2)
+        rsi_val = safe_float(last.get('RSI'), 50.0, 2)
+        macd_h = safe_float(last.get('MACD_Hist'), 0.0, 4)
+        macd_v = safe_float(last.get('MACD'), 0.0, 4)
+        macd_s = safe_float(last.get('MACD_Signal'), 0.0, 4)
+        vwap_val = safe_float(last.get('VWAP'), 0.0, 2)
+        ma20_val = safe_float(last.get('MA20'), 0.0, 2)
+        bb_m = safe_float(last.get('BB_Mid'), 0.0, 2)
+        atr_val = safe_float(last.get('ATR'), 2.0, 2)
+
+        # Pattern check
+        pattern_signal = generate_pattern_signal(current_price, atr_val, ACCOUNT_CONFIG['balance'])
+
+        # Composite check
+        mas = {'ma20': ma20_val if ma20_val > 0 else None, 'ma50': safe_float(last.get('MA50'), 0.0, 2) or None}
+        trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
+            gold_df, mas, current_price, atr_val, macd_v, macd_s, macd_h, rsi_val, vwap_val
+        )
+
+        # BASİT check
+        simple_bull = simple_bear = 0
+        if macd_h > 0: simple_bull += 1
+        elif macd_h < 0: simple_bear += 1
+        if macd_v > macd_s: simple_bull += 1
+        elif macd_v < macd_s: simple_bear += 1
+        if rsi_val > 52: simple_bull += 1
+        elif rsi_val < 48: simple_bear += 1
+        if vwap_val > 0:
+            if current_price > vwap_val: simple_bull += 1
+            elif current_price < vwap_val: simple_bear += 1
+        if ma20_val > 0:
+            if current_price > ma20_val: simple_bull += 1
+            elif current_price < ma20_val: simple_bear += 1
+        if bb_m > 0:
+            if current_price > bb_m: simple_bull += 1
+            elif current_price < bb_m: simple_bear += 1
+
+        kill_switch = check_kill_switch()
+
+        # Pattern data check
+        pattern_df = get_pattern_data()
+        min_bars = PATTERN_CONFIG['pattern_lookback'] + PATTERN_CONFIG['swing_window'] + 20
+
+        return jsonify({
+            "status": "ok",
+            "price": current_price,
+            "gold_bars_1min": len(gold_df),
+            "pattern_bars_5min": len(pattern_df) if not pattern_df.empty else 0,
+            "pattern_min_required": min_bars,
+            "pattern_signal": str(pattern_signal) if pattern_signal else None,
+            "composite": {"trend": trend, "confidence": confidence, "sig_type": sig_type},
+            "basit": {"bull": simple_bull, "bear": simple_bear, "net": simple_bull - simple_bear},
+            "indicators": {
+                "rsi": rsi_val, "macd_h": macd_h, "macd_v": macd_v, "macd_s": macd_s,
+                "vwap": vwap_val, "ma20": ma20_val, "bb_mid": bb_m, "atr": atr_val
+            },
+            "kill_switch": kill_switch,
+            "active_positions": len(_active_positions),
+            "max_simultaneous": MAX_SIMULTANEOUS,
+            "daily_state": _daily_state,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
+
 
 @socketio.on('connect')
 def on_connect():
