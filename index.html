@@ -661,22 +661,37 @@
     }
 
     // ═══ SOCKET.IO ═══
+    let _socket = null;
     try {
       if (typeof io !== 'undefined') {
-        const socket = io({ transports: ['polling', 'websocket'] });
-        socket.on('connect', () => {
+        _socket = io({
+          transports: ['polling', 'websocket'],
+          reconnection: true,
+          reconnectionAttempts: Infinity,
+          reconnectionDelay: 2000,
+          reconnectionDelayMax: 30000,
+          timeout: 20000
+        });
+        _socket.on('connect', () => {
           console.log('WS connected');
           $set('wsLabel', 'CANLI');
           const pill = document.getElementById('statusPill');
           if (pill) { pill.className = 'status-pill live'; }
         });
-        socket.on('disconnect', () => {
-          console.log('WS disconnected');
+        _socket.on('disconnect', (reason) => {
+          console.log('WS disconnected:', reason);
           $set('wsLabel', 'KESILDI');
           const pill = document.getElementById('statusPill');
           if (pill) { pill.className = 'status-pill dead'; }
         });
-        socket.on('market_update', (data) => {
+        _socket.on('connect_error', (err) => {
+          console.log('WS error:', err.message);
+          $set('wsLabel', 'HATA');
+        });
+        _socket.on('reconnect', (attempt) => {
+          console.log('WS reconnected after', attempt, 'attempts');
+        });
+        _socket.on('market_update', (data) => {
           if (data && !data.error) updateDashboard(data);
         });
       }
@@ -922,20 +937,25 @@
           if (apBar) apBar.className = 'pos-bar';
         }
 
-        // Charts
+        // Charts — 24 saat gorunumu
         if (data.candles && data.candles.length > 0) {
-          if (candleChart) candleChart.destroy();
-          candleChart = new ApexCharts(document.getElementById('candleChart'), {
-            series: [{ name: 'XAU/USD', type: 'candlestick', data: data.candles }],
-            chart: { type:'candlestick', height:320, background:'transparent', toolbar:{show:false}, animations:{enabled:false} },
-            xaxis: { type:'datetime', labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, datetimeFormatter:{hour:'HH:mm',minute:'HH:mm'} }, axisBorder:{color:'#1E293B'}, axisTicks:{color:'#1E293B'} },
-            yaxis: { labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, formatter: v=>'$'+v.toLocaleString('en-US',{minimumFractionDigits:2}) } },
-            grid: { borderColor:'rgba(255,255,255,0.03)', xaxis:{lines:{show:false}} },
-            plotOptions: { candlestick:{ colors:{ upward:'#22C55E', downward:'#EF4444' }, wick:{useFillColor:true} } },
-            legend:{show:false},
-            tooltip: { theme:'dark', style:{fontFamily:'JetBrains Mono',fontSize:'11px'}, x:{format:'dd MMM HH:mm'} }
-          });
-          candleChart.render();
+          try {
+            if (candleChart) candleChart.destroy();
+            const chartEl = document.getElementById('candleChart');
+            if (chartEl) {
+              candleChart = new ApexCharts(chartEl, {
+                series: [{ name: 'XAU/USD', type: 'candlestick', data: data.candles }],
+                chart: { type:'candlestick', height:360, background:'transparent', toolbar:{show:true, tools:{download:false,selection:true,zoom:true,zoomin:true,zoomout:true,pan:true,reset:true}}, animations:{enabled:false} },
+                xaxis: { type:'datetime', labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, datetimeFormatter:{day:'dd MMM', hour:'HH:mm', minute:'HH:mm'} }, axisBorder:{color:'#1E293B'}, axisTicks:{color:'#1E293B'} },
+                yaxis: { labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, formatter: v=>'$'+v.toLocaleString('en-US',{minimumFractionDigits:2}) }, forceNiceScale:true },
+                grid: { borderColor:'rgba(255,255,255,0.03)', xaxis:{lines:{show:false}} },
+                plotOptions: { candlestick:{ colors:{ upward:'#22C55E', downward:'#EF4444' }, wick:{useFillColor:true} } },
+                legend:{show:false},
+                tooltip: { theme:'dark', style:{fontFamily:'JetBrains Mono',fontSize:'11px'}, x:{format:'dd MMM HH:mm'} }
+              });
+              candleChart.render();
+            }
+          } catch(chartErr) { console.error('Candle chart error:', chartErr); }
         }
 
         if (data.rsi_series && data.rsi_series.length > 0) renderRsiChart(data.rsi_series);
@@ -993,37 +1013,45 @@
     }
 
     function renderRsiChart(rsiSeries) {
-      const opts = {
-        series: [{ name: 'RSI', data: rsiSeries }],
-        chart: { type:'line', height:160, background:'transparent', toolbar:{show:false}, animations:{enabled:false} },
-        stroke: { curve:'smooth', width:2, colors:['#D4A843'] },
-        fill: { type:'gradient', gradient:{ shadeIntensity:1, opacityFrom:0.2, opacityTo:0.0, stops:[0,100] } },
-        xaxis: { type:'datetime', labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, datetimeFormatter:{minute:'HH:mm'} }, axisBorder:{color:'#1E293B'}, axisTicks:{color:'#1E293B'} },
-        yaxis: { min:0, max:100, tickAmount:4, labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, formatter:v=>v.toFixed(0) } },
-        annotations: { yaxis:[{ y:70, borderColor:'rgba(239,68,68,0.3)', label:{text:'70',style:{color:'#EF4444',background:'transparent',fontFamily:'JetBrains Mono',fontSize:'10px'}} }, { y:30, borderColor:'rgba(34,197,94,0.3)', label:{text:'30',style:{color:'#22C55E',background:'transparent',fontFamily:'JetBrains Mono',fontSize:'10px'}} }] },
-        grid: { borderColor:'rgba(255,255,255,0.03)' },
-        legend:{show:false},
-        tooltip: { theme:'dark', style:{fontFamily:'JetBrains Mono',fontSize:'11px'}, x:{format:'HH:mm'}, y:{formatter:v=>v.toFixed(2)} }
-      };
-      if (!rsiChart) { rsiChart = new ApexCharts(document.getElementById('rsiChart'), opts); rsiChart.render(); }
-      else { rsiChart.updateSeries([{ name:'RSI', data:rsiSeries }], false); }
+      try {
+        const opts = {
+          series: [{ name: 'RSI', data: rsiSeries }],
+          chart: { type:'line', height:160, background:'transparent', toolbar:{show:false}, animations:{enabled:false} },
+          stroke: { curve:'smooth', width:2, colors:['#D4A843'] },
+          fill: { type:'gradient', gradient:{ shadeIntensity:1, opacityFrom:0.2, opacityTo:0.0, stops:[0,100] } },
+          xaxis: { type:'datetime', labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, datetimeFormatter:{hour:'HH:mm',minute:'HH:mm'} }, axisBorder:{color:'#1E293B'}, axisTicks:{color:'#1E293B'} },
+          yaxis: { min:0, max:100, tickAmount:4, labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, formatter:v=>v.toFixed(0) } },
+          annotations: { yaxis:[{ y:70, borderColor:'rgba(239,68,68,0.3)', label:{text:'70',style:{color:'#EF4444',background:'transparent',fontFamily:'JetBrains Mono',fontSize:'10px'}} }, { y:30, borderColor:'rgba(34,197,94,0.3)', label:{text:'30',style:{color:'#22C55E',background:'transparent',fontFamily:'JetBrains Mono',fontSize:'10px'}} }] },
+          grid: { borderColor:'rgba(255,255,255,0.03)' },
+          legend:{show:false},
+          tooltip: { theme:'dark', style:{fontFamily:'JetBrains Mono',fontSize:'11px'}, x:{format:'HH:mm'}, y:{formatter:v=>v.toFixed(2)} }
+        };
+        const rsiEl = document.getElementById('rsiChart');
+        if (!rsiEl) return;
+        if (!rsiChart) { rsiChart = new ApexCharts(rsiEl, opts); rsiChart.render(); }
+        else { rsiChart.updateSeries([{ name:'RSI', data:rsiSeries }], false); }
+      } catch(e) { console.error('RSI chart error:', e); }
     }
 
     function renderEquityChart(eqData) {
-      const opts = {
-        series: [{ name:'Bakiye', data:eqData }],
-        chart: { type:'area', height:240, background:'transparent', toolbar:{show:false}, animations:{enabled:true} },
-        stroke: { curve:'smooth', width:2, colors:['#D4A843'] },
-        fill: { type:'gradient', gradient:{ shadeIntensity:1, opacityFrom:0.3, opacityTo:0.0, stops:[0,100] } },
-        xaxis: { type:'datetime', labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' } } },
-        yaxis: { labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, formatter:v=>'$'+v.toFixed(2) } },
-        grid: { borderColor:'rgba(255,255,255,0.03)' },
-        annotations: { yaxis:[{ y:100, borderColor:'rgba(255,255,255,0.1)', label:{text:'$100',style:{color:'#475569',background:'transparent',fontFamily:'JetBrains Mono',fontSize:'9px'}} }] },
-        tooltip: { theme:'dark', style:{fontFamily:'JetBrains Mono',fontSize:'11px'}, x:{format:'dd MMM HH:mm'}, y:{formatter:v=>'$'+v.toFixed(2)} }
-      };
-      if (equityChart) equityChart.destroy();
-      equityChart = new ApexCharts(document.getElementById('equityChart'), opts);
-      equityChart.render();
+      try {
+        const opts = {
+          series: [{ name:'Bakiye', data:eqData }],
+          chart: { type:'area', height:240, background:'transparent', toolbar:{show:false}, animations:{enabled:true} },
+          stroke: { curve:'smooth', width:2, colors:['#D4A843'] },
+          fill: { type:'gradient', gradient:{ shadeIntensity:1, opacityFrom:0.3, opacityTo:0.0, stops:[0,100] } },
+          xaxis: { type:'datetime', labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' } } },
+          yaxis: { labels:{ style:{ colors:'#475569', fontFamily:'JetBrains Mono', fontSize:'10px' }, formatter:v=>'$'+v.toFixed(2) } },
+          grid: { borderColor:'rgba(255,255,255,0.03)' },
+          annotations: { yaxis:[{ y:100, borderColor:'rgba(255,255,255,0.1)', label:{text:'$100',style:{color:'#475569',background:'transparent',fontFamily:'JetBrains Mono',fontSize:'9px'}} }] },
+          tooltip: { theme:'dark', style:{fontFamily:'JetBrains Mono',fontSize:'11px'}, x:{format:'dd MMM HH:mm'}, y:{formatter:v=>'$'+v.toFixed(2)} }
+        };
+        const eqEl = document.getElementById('equityChart');
+        if (!eqEl) return;
+        if (equityChart) equityChart.destroy();
+        equityChart = new ApexCharts(eqEl, opts);
+        equityChart.render();
+      } catch(e) { console.error('Equity chart error:', e); }
     }
 
     async function loadEventPredictions() {
@@ -1082,6 +1110,7 @@
     // ═══ TOAST ═══
     function showToast(title, message, type='neutral') {
       const c = document.getElementById('toastContainer');
+      if (!c) return;
       const t = document.createElement('div');
       t.className = 'toast';
       t.innerHTML = `<div class="toast-title">${title}</div><div style="font-size:11px;color:var(--text2)">${message}</div>`;
@@ -1103,22 +1132,32 @@
     }
 
     // ═══ INIT ═══
+    let _initRetry = 0;
     async function initLoad() {
       try {
         const res = await fetch(API_BASE + '/api/market_data?interval=1min');
         const data = await res.json();
-        if (data.error) { setTimeout(initLoad, 5000); }
-        else {
-          console.log('[AurumPulse] Veri geldi');
+        if (data.error) {
+          _initRetry++;
+          const delay = Math.min(5000 * Math.pow(1.5, _initRetry), 60000);
+          console.log(`[AurumPulse] Retry #${_initRetry} in ${(delay/1000).toFixed(0)}s`);
+          setTimeout(initLoad, delay);
+        } else {
+          console.log('[AurumPulse] Veri geldi — ' + data.candles?.length + ' mum');
+          _initRetry = 0;
           updateDashboard(data);
-          setInterval(loadData, 15000);
-          setInterval(loadEventPredictions, 60000);
-          setInterval(loadTradeHistory, 15000);
+          // WebSocket varsa polling yavas, yoksa hizli
+          const pollInterval = _socket && _socket.connected ? 30000 : 15000;
+          setInterval(loadData, pollInterval);
+          setInterval(loadEventPredictions, 120000);
+          setInterval(loadTradeHistory, 30000);
           setInterval(loadHistory, 300000);
         }
       } catch(e) {
         console.error('[AurumPulse] Hata:', e);
-        setTimeout(initLoad, 5000);
+        _initRetry++;
+        const delay = Math.min(5000 * Math.pow(1.5, _initRetry), 60000);
+        setTimeout(initLoad, delay);
       }
     }
 

@@ -212,9 +212,9 @@ GOLD_SYMBOL    = "XAU/USD"
 DXY_CANDIDATES = ["EUR/USD"]
 
 INTERVAL_CONFIG = {
-    '1min':  {'outputsize': 120, 'candle_count': 60, 'label': '1 Dakika'},
-    '5min':  {'outputsize': 200, 'candle_count': 60, 'label': '5 Dakika'},
-    '15min': {'outputsize': 120, 'candle_count': 50, 'label': '15 Dakika'},
+    '1min':  {'outputsize': 300, 'candle_count': 300, 'label': '1 Dakika'},
+    '5min':  {'outputsize': 300, 'candle_count': 288, 'label': '5 Dakika'},
+    '15min': {'outputsize': 120, 'candle_count': 96, 'label': '15 Dakika'},
     '1h':    {'outputsize': 120, 'candle_count': 48, 'label': '1 Saat'},
 }
 
@@ -3126,7 +3126,10 @@ def build_response_payload(interval='1min'):
         gold_df_raw, dxy_df, dxy_sym = fetch_market_data(interval)
 
         if gold_df_raw.empty:
+            print(f"⚠️ build_response_payload: gold_df_raw BOŞ — {interval} verisi gelmedi")
             return None
+
+        print(f"✅ Veri geldi: {len(gold_df_raw)} bar ({interval})")
 
         gold_df = calculate_indicators(gold_df_raw.copy())
         last = gold_df.iloc[-1]
@@ -4120,7 +4123,7 @@ def get_market_data():
         if payload is not None:
             return jsonify(payload)
         else:
-            return jsonify({"error": "API limiti aşıldı, lütfen 1 dakika bekleyin."})
+            return jsonify({"error": "Veri yok — TwelveData API'den cevap gelmedi. Piyasa kapali olabilir veya API limiti dolmus olabilir."})
     except Exception as e:
         return jsonify({"error": f"Sunucu Hatası: {str(e)}"})
 
