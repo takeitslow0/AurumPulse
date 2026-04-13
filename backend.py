@@ -3427,15 +3427,18 @@ def build_response_payload(interval='1min'):
                     should_open = True
                     quality_reasons.append('SİMÜLASYON-ZAYIF')
                 elif confidence == "YOK" and trend == "nötr":
-                    # ── BASİT SİNYAL FALLBACK — RSI + MACD + VWAP ile trade aç ──
+                    # ── BASİT SİNYAL FALLBACK — RSI + MACD + VWAP + MA20 + BB ile trade aç ──
                     simple_bull = 0
                     simple_bear = 0
-                    # MACD histogram yönü
+                    # MACD histogram yönü (en güçlü gösterge)
                     if macd_h > 0: simple_bull += 1
                     elif macd_h < 0: simple_bear += 1
-                    # RSI momentum
-                    if rsi_val > 55: simple_bull += 1
-                    elif rsi_val < 45: simple_bear += 1
+                    # MACD çizgi kesişimi
+                    if macd_v > macd_s: simple_bull += 1
+                    elif macd_v < macd_s: simple_bear += 1
+                    # RSI momentum (geniş bant)
+                    if rsi_val > 52: simple_bull += 1
+                    elif rsi_val < 48: simple_bear += 1
                     # VWAP pozisyonu
                     if vwap_val > 0:
                         if current_price > vwap_val: simple_bull += 1
@@ -3444,31 +3447,38 @@ def build_response_payload(interval='1min'):
                     if ma20_val > 0:
                         if current_price > ma20_val: simple_bull += 1
                         elif current_price < ma20_val: simple_bear += 1
+                    # Bollinger Band pozisyonu
+                    if bb_m > 0:
+                        if current_price > bb_m: simple_bull += 1
+                        elif current_price < bb_m: simple_bear += 1
 
-                    if simple_bull >= 3 and simple_bear == 0 and rsi_val < 65:
+                    net_bull = simple_bull - simple_bear
+                    net_bear = simple_bear - simple_bull
+
+                    if net_bull >= 2 and rsi_val < 68 and rsi_val > 30:
                         trend = "bullish"
                         confidence = "BASİT"
-                        sig_type = f"📈 BASİT LONG — RSI+MACD+VWAP ({simple_bull}/4) 🟢"
+                        sig_type = f"📈 BASİT LONG — Teknik Hizalama ({simple_bull}/{simple_bull+simple_bear}) 🟢"
                         sl = current_price - (1.5 * atr_val)
                         tp1 = current_price + (2.0 * atr_val)
                         tp2 = current_price + (3.0 * atr_val)
                         should_open = True
                         quality_score = simple_bull
-                        quality_reasons = ['BASİT-LONG', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}']
-                        print(f"   📈 BASİT LONG sinyal: bull={simple_bull}, bear={simple_bear}")
-                    elif simple_bear >= 3 and simple_bull == 0 and rsi_val > 35:
+                        quality_reasons = ['BASİT-LONG', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}', f'Net:+{net_bull}']
+                        print(f"   📈 BASİT LONG sinyal: bull={simple_bull}, bear={simple_bear}, net=+{net_bull}")
+                    elif net_bear >= 2 and rsi_val > 32 and rsi_val < 70:
                         trend = "bearish"
                         confidence = "BASİT"
-                        sig_type = f"📉 BASİT SHORT — RSI+MACD+VWAP ({simple_bear}/4) 🔴"
+                        sig_type = f"📉 BASİT SHORT — Teknik Hizalama ({simple_bear}/{simple_bull+simple_bear}) 🔴"
                         sl = current_price + (1.5 * atr_val)
                         tp1 = current_price - (2.0 * atr_val)
                         tp2 = current_price - (3.0 * atr_val)
                         should_open = True
                         quality_score = simple_bear
-                        quality_reasons = ['BASİT-SHORT', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}']
-                        print(f"   📉 BASİT SHORT sinyal: bull={simple_bull}, bear={simple_bear}")
+                        quality_reasons = ['BASİT-SHORT', f'RSI:{rsi_val:.0f}', f'MACD_H:{macd_h:.4f}', f'Net:-{net_bear}']
+                        print(f"   📉 BASİT SHORT sinyal: bull={simple_bull}, bear={simple_bear}, net=-{net_bear}")
                     else:
-                        print(f"   Sinyal açılmadı: BASİT filtre geçemedi (bull={simple_bull}, bear={simple_bear})")
+                        print(f"   Sinyal açılmadı: BASİT filtre (bull={simple_bull}, bear={simple_bear}, net={net_bull})")
                 else:
                     print(f"   Sinyal açılmadı: confidence={confidence}, trend={trend}")
 
