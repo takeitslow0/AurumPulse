@@ -4326,9 +4326,501 @@ def on_disconnect():
 def on_subscribe(data):
     pass
 
+# ═══════════════════════════════════════════════════════════════
+# KRİPTO MODÜLÜ — Binance Public API (ücretsiz, key gereksiz)
+# BTC, ETH, SOL, XRP — Fiyat, Sinyal, Simülasyon
+# ═══════════════════════════════════════════════════════════════
+
+CRYPTO_SYMBOLS = {
+    'BTCUSDT': {'name': 'Bitcoin',  'short': 'BTC', 'icon': '₿', 'decimals': 2},
+    'ETHUSDT': {'name': 'Ethereum', 'short': 'ETH', 'icon': 'Ξ', 'decimals': 2},
+    'SOLUSDT': {'name': 'Solana',   'short': 'SOL', 'icon': '◎', 'decimals': 3},
+    'XRPUSDT': {'name': 'XRP',      'short': 'XRP', 'icon': '✕', 'decimals': 4},
+}
+
+BINANCE_BASE = "https://api.binance.com"
+
+# ── Crypto Cache ──
+_crypto_cache = {}      # {symbol: {'df': DataFrame, 'ts': timestamp, 'interval': str}}
+_crypto_cache_lock = threading.Lock()
+CRYPTO_CACHE_TTL = {'1m': 30, '5m': 120, '15m': 300, '1h': 900}
+
+# ── Crypto Positions & Trades ──
+_crypto_positions = {}   # {symbol: [position_dicts]}
+_crypto_trades = []      # Trade history
+CRYPTO_SIM_BALANCE = {'balance': 500.0}  # $500 başlangıç
+CRYPTO_MAX_POS = 2       # Coin başına max 2 pozisyon
+
+
+def binance_klines(symbol, interval='1m', limit=300):
+    """Binance'den mum verisi çeker — ücretsiz, key gereksiz"""
+    try:
+        resp = requests.get(f"{BINANCE_BASE}/api/v3/klines", params={
+            'symbol': symbol, 'interval': interval, 'limit': limit
+        }, timeout=10)
+        data = resp.json()
+        if not isinstance(data, list) or len(data) == 0:
+            return pd.DataFrame()
+        df = pd.DataFrame(data, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_vol', 'trades', 'taker_buy_base',
+            'taker_buy_quote', 'ignore'
+        ])
+        df['open'] = df['open'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
+        df['datetime'] = pd.to_datetime(df['open_time'], unit='ms')
+        return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+    except Exception as e:
+        print(f"❌ Binance klines hatası ({symbol}): {e}")
+        return pd.DataFrame()
+
+
+def get_crypto_data(symbol, interval='1m'):
+    """Cache'li kripto verisi"""
+    cache_key = f"{symbol}_{interval}"
+    ttl = CRYPTO_CACHE_TTL.get(interval, 30)
+    with _crypto_cache_lock:
+        cached = _crypto_cache.get(cache_key)
+        if cached and (time.time() - cached['ts']) < ttl:
+            return cached['df']
+    df = binance_klines(symbol, interval, 300)
+    if not df.empty:
+        with _crypto_cache_lock:
+            _crypto_cache[cache_key] = {'df': df, 'ts': time.time()}
+    return df
+
+
+def crypto_indicators(df):
+    """Kripto için teknik indikatörler — Gold ile aynı mantık"""
+    if df.empty or len(df) < 26:
+        return df
+    close = df['close']
+    d = close.diff()
+
+    # RSI (14)
+    gain = d.clip(lower=0).ewm(com=13, adjust=False).mean()
+    loss = (-d.clip(upper=0)).ewm(com=13, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df['RSI'] = (100 - 100 / (1 + rs)).fillna(50)
+
+    # MACD (12, 26, 9)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema12 - ema26
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
+    # EMA 20/50
+    df['EMA20'] = close.ewm(span=20, adjust=False).mean()
+    df['EMA50'] = close.ewm(span=50, adjust=False).mean()
+
+    # Bollinger Bands (20, 2)
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    df['BB_Up'] = sma20 + 2 * std20
+    df['BB_Mid'] = sma20
+    df['BB_Low'] = sma20 - 2 * std20
+
+    # ATR (14)
+    tr = pd.concat([
+        df['high'] - df['low'],
+        (df['high'] - close.shift()).abs(),
+        (df['low'] - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    df['ATR'] = tr.rolling(14).mean()
+
+    # Volume SMA
+    df['VOL_SMA'] = df['volume'].rolling(20).mean()
+
+    return df
+
+
+def crypto_signal(symbol, interval='1m'):
+    """Kripto sinyal motoru — Composite scoring"""
+    df = get_crypto_data(symbol, interval)
+    if df.empty:
+        return None
+
+    df = crypto_indicators(df.copy())
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) > 1 else last
+    meta = CRYPTO_SYMBOLS.get(symbol, {})
+    dec = meta.get('decimals', 2)
+
+    price = round(float(last['close']), dec)
+    rsi = float(last.get('RSI', 50))
+    macd_h = float(last.get('MACD_Hist', 0))
+    ema20 = float(last.get('EMA20', price))
+    ema50 = float(last.get('EMA50', price))
+    bb_up = float(last.get('BB_Up', price))
+    bb_low = float(last.get('BB_Low', price))
+    atr = float(last.get('ATR', price * 0.01))
+    vol = float(last.get('volume', 0))
+    vol_sma = float(last.get('VOL_SMA', vol)) if last.get('VOL_SMA') else vol
+
+    # ── SCORING ──
+    score = 0
+    reasons = []
+
+    # RSI
+    if rsi < 30:
+        score += 2; reasons.append(f"RSI oversold ({rsi:.0f})")
+    elif rsi < 40:
+        score += 1; reasons.append(f"RSI düşük ({rsi:.0f})")
+    elif rsi > 70:
+        score -= 2; reasons.append(f"RSI overbought ({rsi:.0f})")
+    elif rsi > 60:
+        score -= 1; reasons.append(f"RSI yüksek ({rsi:.0f})")
+
+    # MACD
+    if macd_h > 0 and float(prev.get('MACD_Hist', 0)) <= 0:
+        score += 2; reasons.append("MACD bullish cross")
+    elif macd_h < 0 and float(prev.get('MACD_Hist', 0)) >= 0:
+        score -= 2; reasons.append("MACD bearish cross")
+    elif macd_h > 0:
+        score += 1; reasons.append("MACD pozitif")
+    else:
+        score -= 1; reasons.append("MACD negatif")
+
+    # EMA Trend
+    if ema20 > ema50 and price > ema20:
+        score += 2; reasons.append("Güçlü yükseliş trendi (EMA)")
+    elif ema20 > ema50:
+        score += 1; reasons.append("Yükseliş trendi (EMA)")
+    elif ema20 < ema50 and price < ema20:
+        score -= 2; reasons.append("Güçlü düşüş trendi (EMA)")
+    elif ema20 < ema50:
+        score -= 1; reasons.append("Düşüş trendi (EMA)")
+
+    # Bollinger
+    bb_width = (bb_up - bb_low) / bb_low * 100 if bb_low > 0 else 0
+    if price <= bb_low:
+        score += 1; reasons.append("BB alt bandında")
+    elif price >= bb_up:
+        score -= 1; reasons.append("BB üst bandında")
+    if bb_width < 2:
+        reasons.append("BB squeeze — kırılım yakın")
+
+    # Volume confirmation
+    if vol_sma > 0 and vol > vol_sma * 1.5:
+        if score > 0:
+            score += 1; reasons.append("Yüksek hacim (bullish onay)")
+        elif score < 0:
+            score -= 1; reasons.append("Yüksek hacim (bearish onay)")
+
+    # ── KARAR ──
+    if score >= 3:
+        trend = "bullish"
+        sig_type = f"LONG 📈 ({meta.get('short', symbol)})"
+        sl = round(price - 1.5 * atr, dec)
+        tp1 = round(price + 2.0 * atr, dec)
+        tp2 = round(price + 3.5 * atr, dec)
+        confidence = min(95, 50 + score * 8)
+    elif score <= -3:
+        trend = "bearish"
+        sig_type = f"SHORT 📉 ({meta.get('short', symbol)})"
+        sl = round(price + 1.5 * atr, dec)
+        tp1 = round(price - 2.0 * atr, dec)
+        tp2 = round(price - 3.5 * atr, dec)
+        confidence = min(95, 50 + abs(score) * 8)
+    else:
+        trend = "nötr"
+        sig_type = "BEKLE ⚪"
+        sl = tp1 = tp2 = 0
+        confidence = max(10, 50 - abs(score) * 5)
+
+    return {
+        'symbol': symbol,
+        'name': meta.get('name', symbol),
+        'short': meta.get('short', symbol),
+        'icon': meta.get('icon', ''),
+        'price': price,
+        'trend': trend,
+        'signal_type': sig_type,
+        'sl': sl, 'tp1': tp1, 'tp2': tp2,
+        'confidence': confidence,
+        'score': score,
+        'rsi': round(rsi, 1),
+        'macd_hist': round(macd_h, dec + 2),
+        'ema20': round(ema20, dec),
+        'ema50': round(ema50, dec),
+        'bb_up': round(bb_up, dec),
+        'bb_low': round(bb_low, dec),
+        'atr': round(atr, dec + 1),
+        'volume': round(vol, 0),
+        'reasons': reasons
+    }
+
+
+def crypto_manage_positions(symbol, signal):
+    """Kripto pozisyon yönetimi — otomatik SL/TP kontrol"""
+    if symbol not in _crypto_positions:
+        _crypto_positions[symbol] = []
+
+    positions = _crypto_positions[symbol]
+    price = signal['price']
+    closed = []
+
+    # Mevcut pozisyonları kontrol et
+    for pos in positions[:]:
+        if pos['trend'] == 'bullish':
+            pnl = (price - pos['entry']) / pos['entry'] * 100
+            if price <= pos['sl']:
+                closed.append({**pos, 'exit': price, 'pnl_pct': pnl, 'reason': 'SL'})
+                positions.remove(pos)
+            elif price >= pos['tp1'] and not pos.get('tp1_hit'):
+                pos['tp1_hit'] = True
+                pos['sl'] = pos['entry']  # Breakeven
+            elif price >= pos['tp2']:
+                closed.append({**pos, 'exit': price, 'pnl_pct': pnl, 'reason': 'TP2'})
+                positions.remove(pos)
+        else:
+            pnl = (pos['entry'] - price) / pos['entry'] * 100
+            if price >= pos['sl']:
+                closed.append({**pos, 'exit': price, 'pnl_pct': pnl, 'reason': 'SL'})
+                positions.remove(pos)
+            elif price <= pos['tp1'] and not pos.get('tp1_hit'):
+                pos['tp1_hit'] = True
+                pos['sl'] = pos['entry']
+            elif price <= pos['tp2']:
+                closed.append({**pos, 'exit': price, 'pnl_pct': pnl, 'reason': 'TP2'})
+                positions.remove(pos)
+
+    # Kapatılan pozisyonları kaydet
+    for c in closed:
+        usd_pnl = c['pnl_pct'] / 100 * c.get('size_usd', 50)
+        CRYPTO_SIM_BALANCE['balance'] += usd_pnl
+        _crypto_trades.append({
+            'symbol': symbol,
+            'name': CRYPTO_SYMBOLS.get(symbol, {}).get('short', symbol),
+            'trend': c['trend'],
+            'entry': c['entry'],
+            'exit': c['exit'],
+            'pnl_pct': round(c['pnl_pct'], 2),
+            'pnl_usd': round(usd_pnl, 2),
+            'reason': c['reason'],
+            'closed_at': datetime.now(timezone.utc).isoformat()
+        })
+
+    # Yeni pozisyon aç
+    if signal['trend'] != 'nötr' and len(positions) < CRYPTO_MAX_POS and signal['confidence'] >= 60:
+        # Aynı yönde açık pozisyon var mı?
+        same_dir = [p for p in positions if p['trend'] == signal['trend']]
+        if len(same_dir) == 0:
+            size_usd = min(50, CRYPTO_SIM_BALANCE['balance'] * 0.1)  # Max %10 veya $50
+            if size_usd >= 5:
+                new_pos = {
+                    'trend': signal['trend'],
+                    'entry': price,
+                    'sl': signal['sl'],
+                    'tp1': signal['tp1'],
+                    'tp2': signal['tp2'],
+                    'size_usd': round(size_usd, 2),
+                    'confidence': signal['confidence'],
+                    'opened_at': datetime.now(timezone.utc).isoformat(),
+                    'tp1_hit': False
+                }
+                positions.append(new_pos)
+
+    return positions, closed
+
+
+# ── Crypto API Endpoints ──
+
+@app.route('/crypto')
+def serve_crypto():
+    from flask import send_from_directory
+    return send_from_directory(_BASE_DIR, 'crypto.html')
+
+
+@app.route('/api/crypto/market_data')
+def crypto_market_data():
+    """Tüm kripto coinlerin fiyat + sinyal + pozisyon bilgisi"""
+    interval = request.args.get('interval', '1m')
+    bin_interval = {'1min': '1m', '5min': '5m', '15min': '15m', '1h': '1h'}.get(interval, interval)
+    results = {}
+
+    for symbol, meta in CRYPTO_SYMBOLS.items():
+        sig = crypto_signal(symbol, bin_interval)
+        if not sig:
+            continue
+
+        positions, closed = crypto_manage_positions(symbol, sig)
+        dec = meta['decimals']
+
+        # Candle verisi
+        df = get_crypto_data(symbol, bin_interval)
+        candles = []
+        if not df.empty:
+            df_ind = crypto_indicators(df.copy())
+            for _, row in df_ind.tail(200).iterrows():
+                candles.append({
+                    'x': int(row['datetime'].timestamp() * 1000),
+                    'y': [round(row['open'], dec), round(row['high'], dec),
+                          round(row['low'], dec), round(row['close'], dec)]
+                })
+
+        # Aktif pozisyon PnL
+        pos_list = []
+        for p in positions:
+            if p['trend'] == 'bullish':
+                pnl_pct = (sig['price'] - p['entry']) / p['entry'] * 100
+            else:
+                pnl_pct = (p['entry'] - sig['price']) / p['entry'] * 100
+            pnl_usd = pnl_pct / 100 * p.get('size_usd', 50)
+            pos_list.append({
+                'trend': p['trend'],
+                'entry': p['entry'],
+                'sl': p['sl'],
+                'tp1': p['tp1'],
+                'tp2': p['tp2'],
+                'size_usd': p.get('size_usd', 50),
+                'pnl_pct': round(pnl_pct, 2),
+                'pnl_usd': round(pnl_usd, 2),
+                'tp1_hit': p.get('tp1_hit', False)
+            })
+
+        results[symbol] = {
+            **sig,
+            'candles': candles,
+            'positions': pos_list,
+            'closed_count': len([t for t in _crypto_trades if t['symbol'] == symbol])
+        }
+
+    return jsonify({
+        'coins': results,
+        'balance': round(CRYPTO_SIM_BALANCE['balance'], 2),
+        'total_trades': len(_crypto_trades),
+        'interval': bin_interval,
+        'timestamp': int(time.time() * 1000)
+    })
+
+
+@app.route('/api/crypto/coin/<symbol>')
+def crypto_coin_detail(symbol):
+    """Tek coin detay — grafik + sinyal + pozisyon"""
+    symbol = symbol.upper()
+    if symbol not in CRYPTO_SYMBOLS:
+        return jsonify({'error': f'{symbol} desteklenmiyor'}), 404
+
+    interval = request.args.get('interval', '1m')
+    bin_interval = {'1min': '1m', '5min': '5m', '15min': '15m', '1h': '1h'}.get(interval, interval)
+    sig = crypto_signal(symbol, bin_interval)
+    if not sig:
+        return jsonify({'error': 'Veri alınamadı'}), 500
+
+    meta = CRYPTO_SYMBOLS[symbol]
+    dec = meta['decimals']
+    df = get_crypto_data(symbol, bin_interval)
+    candles = []
+    rsi_data = []
+    if not df.empty:
+        df_ind = crypto_indicators(df.copy())
+        for _, row in df_ind.tail(200).iterrows():
+            ts = int(row['datetime'].timestamp() * 1000)
+            candles.append({
+                'x': ts,
+                'y': [round(row['open'], dec), round(row['high'], dec),
+                      round(row['low'], dec), round(row['close'], dec)]
+            })
+            if 'RSI' in row and not pd.isna(row['RSI']):
+                rsi_data.append({'x': ts, 'y': round(float(row['RSI']), 1)})
+
+    positions = _crypto_positions.get(symbol, [])
+    pos_list = []
+    for p in positions:
+        if p['trend'] == 'bullish':
+            pnl_pct = (sig['price'] - p['entry']) / p['entry'] * 100
+        else:
+            pnl_pct = (p['entry'] - sig['price']) / p['entry'] * 100
+        pos_list.append({
+            'trend': p['trend'], 'entry': p['entry'],
+            'sl': p['sl'], 'tp1': p['tp1'], 'tp2': p['tp2'],
+            'pnl_pct': round(pnl_pct, 2),
+            'pnl_usd': round(pnl_pct / 100 * p.get('size_usd', 50), 2)
+        })
+
+    trades = [t for t in _crypto_trades if t['symbol'] == symbol][-20:]
+
+    return jsonify({
+        **sig,
+        'candles': candles,
+        'rsi_data': rsi_data,
+        'positions': pos_list,
+        'trades': trades,
+        'balance': round(CRYPTO_SIM_BALANCE['balance'], 2)
+    })
+
+
+@app.route('/api/crypto/trades')
+def crypto_trade_history():
+    """Kripto trade geçmişi"""
+    return jsonify({
+        'trades': _crypto_trades[-50:],
+        'balance': round(CRYPTO_SIM_BALANCE['balance'], 2),
+        'total_trades': len(_crypto_trades),
+        'total_pnl': round(sum(t['pnl_usd'] for t in _crypto_trades), 2)
+    })
+
+
+@app.route('/api/crypto/reset', methods=['POST'])
+def crypto_reset():
+    """Kripto simülasyon sıfırla"""
+    global _crypto_positions, _crypto_trades
+    _crypto_positions = {}
+    _crypto_trades = []
+    CRYPTO_SIM_BALANCE['balance'] = 500.0
+    return jsonify({'status': 'ok', 'balance': 500.0})
+
+
+# ── Crypto Background Scanner ──
+def crypto_scanner():
+    """30 saniyede bir tüm kripto coinleri tarar"""
+    time.sleep(8)  # Gold scanner'dan sonra başla
+    _scan = 0
+    while True:
+        _scan += 1
+        try:
+            all_signals = {}
+            for symbol in CRYPTO_SYMBOLS:
+                sig = crypto_signal(symbol, '1m')
+                if sig:
+                    crypto_manage_positions(symbol, sig)
+                    all_signals[symbol] = {
+                        'price': sig['price'],
+                        'trend': sig['trend'],
+                        'signal_type': sig['signal_type'],
+                        'confidence': sig['confidence'],
+                        'rsi': sig['rsi'],
+                        'positions': len(_crypto_positions.get(symbol, []))
+                    }
+            # Frontend'e push
+            socketio.emit('crypto_update', {
+                'signals': all_signals,
+                'balance': round(CRYPTO_SIM_BALANCE['balance'], 2),
+                'timestamp': int(time.time() * 1000)
+            })
+            if _scan % 10 == 0:
+                coins_str = " | ".join([f"{CRYPTO_SYMBOLS[s]['short']}:{d.get('trend','?')}" for s, d in all_signals.items()])
+                print(f"🪙 Crypto scan #{_scan}: {coins_str}")
+        except Exception as e:
+            print(f"❌ Crypto scanner hatası #{_scan}: {e}")
+            traceback.print_exc()
+        time.sleep(30)
+
+threading.Thread(target=crypto_scanner, daemon=True).start()
+
+
+# ═══════════════════════════════════════════════════════════════
+
+
 if __name__ == '__main__':
     print("🚀 AurumPulse Backend başlatılıyor...")
     print("📊 Birleşik Sinyal Motoru: MTF + Price Action + Bollinger Squeeze")
+    print("🪙 Kripto Modülü: BTC, ETH, SOL, XRP (Binance API)")
     print("💡 WebSocket 500 alıyorsan: pip install simple-websocket")
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Port: {port}")
