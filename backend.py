@@ -226,6 +226,57 @@ def get_validated_interval(p):
     return '1min'
 
 # ─────────────────────────────────────────
+# CANLI GOLD FİYATI — Çoklu kaynak (TwelveData gecikmeli olabilir)
+# ─────────────────────────────────────────
+_live_gold = {'price': 0, 'source': '', 'ts': 0}
+
+def fetch_live_gold_price():
+    """Birden fazla ücretsiz kaynaktan anlık gold fiyatı çeker.
+    TwelveData free plan 15dk gecikeli olabiliyor, bu yüzden
+    önce gerçek zamanlı kaynaklari dener."""
+    global _live_gold
+
+    # Kaynak 1: Gold-API.com (ücretsiz, key gereksiz)
+    try:
+        resp = requests.get("https://gold-api.com/api/price/XAU", timeout=8)
+        data = resp.json()
+        if data and 'price' in data:
+            p = float(data['price'])
+            if p > 1000:  # Mantıklı gold fiyatı mı?
+                _live_gold = {'price': p, 'source': 'gold-api.com', 'ts': time.time()}
+                return p
+    except:
+        pass
+
+    # Kaynak 2: Frankfurter.app (ECB verileri — forex bazlı)
+    try:
+        resp = requests.get("https://api.frankfurter.app/latest?from=XAU&to=USD", timeout=8)
+        data = resp.json()
+        if data and 'rates' in data and 'USD' in data['rates']:
+            p = float(data['rates']['USD'])
+            if p > 1000:
+                _live_gold = {'price': p, 'source': 'frankfurter', 'ts': time.time()}
+                return p
+    except:
+        pass
+
+    # Kaynak 3: TwelveData /price endpoint (1 kredi, gecikeli olabilir)
+    try:
+        resp = requests.get(f"{TD_BASE_URL}/price",
+            params={"symbol": "XAU/USD", "apikey": TD_API_KEY}, timeout=8)
+        data = resp.json()
+        if 'price' in data:
+            p = float(data['price'])
+            if p > 1000:
+                _live_gold = {'price': p, 'source': 'twelvedata', 'ts': time.time()}
+                return p
+    except:
+        pass
+
+    return _live_gold.get('price', 0)
+
+
+# ─────────────────────────────────────────
 # RATE LIMITER (Dakikada maks. 8 çağrı — TwelveData Free)
 # ─────────────────────────────────────────
 _call_times = []
@@ -3140,6 +3191,9 @@ def build_response_payload(interval='1min'):
 
         dxy_price = safe_float(dxy_df['close'].iloc[-1], 0.0, 4) if not dxy_df.empty else 0.0
         current_price = safe_float(last.get('close'), 0.0, 2)
+        # Canlı fiyat kaynağından daha güncel fiyat varsa kullan
+        if _live_gold['price'] > 0 and (time.time() - _live_gold['ts']) < 120:
+            current_price = round(_live_gold['price'], 2)
         current_vol = safe_float(last.get('volume'), 0.0, 2)
         if current_vol == 0:
             current_vol = safe_float(
@@ -3621,6 +3675,7 @@ def build_response_payload(interval='1min'):
         return {
             "interval": interval, "interval_label": config['label'],
             "gold_price": current_price,
+            "price_source": _live_gold.get('source', 'twelvedata') if _live_gold['price'] > 0 else 'twelvedata',
             "gold_open": safe_float(last.get('open')),
             "gold_high": safe_float(last.get('high')),
             "gold_low": safe_float(last.get('low')),
@@ -3676,6 +3731,12 @@ def background_scanner():
         t0 = time.time()
         _scan_count += 1
         try:
+            # Önce canlı gold fiyatını güncelle (TwelveData'dan bağımsız)
+            live_p = fetch_live_gold_price()
+            if live_p > 0:
+                src = _live_gold.get('source', '?')
+                if _scan_count <= 3 or _scan_count % 10 == 0:
+                    print(f"   💰 Canlı gold: ${live_p:.2f} (kaynak: {src})")
             # Cache'i temizleme — TTL'e güven, gereksiz API çağrısı yapma
             payload = build_response_payload('1min')
             if payload:
