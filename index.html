@@ -1185,9 +1185,9 @@
           console.log('[AurumPulse] Veri geldi — ' + data.candles?.length + ' mum');
           _initRetry = 0;
           updateDashboard(data);
-          // WebSocket varsa polling yavas, yoksa hizli
-          const pollInterval = _socket && _socket.connected ? 60000 : 30000;
-          setInterval(loadData, pollInterval);
+          // Socket.IO market_update + price_tick ile guncelleniyor
+          // loadData fallback olarak 90sn'de bir calisir
+          setInterval(loadData, 90000);
           setInterval(loadEventPredictions, 120000);
           setInterval(loadTradeHistory, 60000);
           setInterval(loadHistory, 300000);

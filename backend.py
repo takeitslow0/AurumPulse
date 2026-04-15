@@ -253,7 +253,7 @@ _dxy_cache  = {'df': pd.DataFrame(), 'sym': '', 'ts': 0}
 _htf_cache  = {'df': pd.DataFrame(), 'ts': 0}  # 15dk HTF cache
 _cache_lock = threading.Lock()
 
-GOLD_TTL = {'1min': 120, '5min': 600, '15min': 900, '1h': 3600}
+GOLD_TTL = {'1min': 90, '5min': 600, '15min': 900, '1h': 3600}  # 1min=90sn → ~480 çağrı/gün
 DXY_TTL  = 3600  # DXY 1 saat cache — API tasarrufu
 HTF_TTL  = 3600  # 15dk cache 1 saat — API tasarrufu
 
@@ -3690,6 +3690,9 @@ def background_scanner():
                 dxy = payload.get('dxy_price', 0)
                 if price > 0:
                     save_market_data(price, rsi, dxy)
+                    # Price emitter için güncelle (WS yoksa tek kaynak)
+                    _live_price['price'] = price
+                    _live_price['ts'] = int(time.time() * 1000)
                 ts = payload.get('trading_signals', {})
                 ap = len(_active_positions)
                 print(f"   📊 [{_scan_count}] Sinyal: {ts.get('trend','?')} | Conf: {ts.get('pattern','?')} | Aktif Poz: {ap}/3 | RSI: {rsi:.1f}")
@@ -3700,27 +3703,34 @@ def background_scanner():
         except Exception as e:
             print(f"Scanner Hatası #{_scan_count}: {e}")
             traceback.print_exc()
-        time.sleep(60)  # 60sn döngü — indikatör/sinyal hesabı (fiyat WS'den geliyor)
+        time.sleep(30)  # 30sn döngü — cache TTL sayesinde API maliyeti aynı kalır
 
 threading.Thread(target=background_scanner, daemon=True).start()
 
 # ─────────────────────────────────────────
-# TWELVEDATA WEBSOCKET — CANLI FİYAT AKIŞI
-# REST API limitini KULLANMAZ — saniye bazlı fiyat güncellemesi
+# CANLI FİYAT SİSTEMİ
+# 1) TwelveData WebSocket dener (Pro+ plan gerekli)
+# 2) Başarısız olursa → hafif REST price poller (15sn, 1 kredi/çağrı)
 # ─────────────────────────────────────────
 _live_price = {'price': 0, 'ts': 0}
+_ws_connected = False  # WS bağlı mı?
 
 def _td_ws_stream():
-    """TwelveData WebSocket ile saniye bazlı XAU/USD fiyat akışı"""
+    """TwelveData WebSocket — Pro+ plan gerekli, 3 deneme sonra pes eder"""
+    global _ws_connected
     _retry = 0
-    while True:
+    MAX_WS_RETRIES = 3  # Free plan desteklemez, 3 denemede pes et
+
+    while _retry < MAX_WS_RETRIES:
         try:
             ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={TD_API_KEY}"
-            print(f"🔌 TwelveData WS bağlanıyor... (deneme #{_retry+1})")
+            print(f"🔌 TwelveData WS bağlanıyor... (deneme #{_retry+1}/{MAX_WS_RETRIES})")
 
             def on_open(ws):
                 nonlocal _retry
+                global _ws_connected
                 _retry = 0
+                _ws_connected = True
                 sub = {"action": "subscribe", "params": {"symbols": "XAU/USD"}}
                 ws.send(_json.dumps(sub))
                 print("✅ TwelveData WS bağlandı — XAU/USD akışı başladı")
@@ -3732,7 +3742,6 @@ def _td_ws_stream():
                         price = float(data['price'])
                         _live_price['price'] = price
                         _live_price['ts'] = int(time.time() * 1000)
-                        # Frontend'e push
                         socketio.emit('price_tick', {
                             'price': price,
                             'timestamp': _live_price['ts'],
@@ -3746,13 +3755,19 @@ def _td_ws_stream():
                         })
                     elif data.get('event') == 'subscribe-status':
                         print(f"   📡 WS subscribe: {data.get('status', '?')}")
+                    elif data.get('status') == 'error':
+                        print(f"   ❌ WS hata: {data.get('message', '?')}")
                 except Exception as e:
-                    pass  # JSON parse hataları — sessizce geç
+                    pass
 
             def on_error(ws, error):
+                global _ws_connected
+                _ws_connected = False
                 print(f"⚠️ TwelveData WS hata: {error}")
 
             def on_close(ws, close_status, close_msg):
+                global _ws_connected
+                _ws_connected = False
                 print(f"🔌 TwelveData WS kapandı: {close_status} {close_msg}")
 
             ws = _ws_client.WebSocketApp(
@@ -3766,10 +3781,39 @@ def _td_ws_stream():
         except Exception as e:
             print(f"❌ TwelveData WS bağlantı hatası: {e}")
 
+        _ws_connected = False
         _retry += 1
-        wait = min(5 * (2 ** _retry), 120)  # Exponential backoff: 10s, 20s, 40s... max 120s
-        print(f"🔄 TwelveData WS yeniden bağlanacak: {wait}sn sonra")
-        time.sleep(wait)
+        if _retry < MAX_WS_RETRIES:
+            wait = min(10 * (2 ** _retry), 60)
+            print(f"🔄 TwelveData WS yeniden bağlanacak: {wait}sn sonra (deneme {_retry}/{MAX_WS_RETRIES})")
+            time.sleep(wait)
+
+    print("⚠️ TwelveData WS 3 denemede bağlanamadı (Free plan desteklemez) → REST price poller aktif")
+    # WS başarısız → REST price poller'ı başlat
+    _start_price_poller()
+
+
+def _start_price_poller():
+    """Cache-based price emitter — EK API çağrısı YAPMAZ.
+    Scanner'ın cache'e koyduğu son fiyatı 10 saniyede bir frontend'e push eder.
+    API limiti hiç etkilenmez — sadece mevcut cache'i yeniden emit eder."""
+    print("🔄 Price Emitter başlatılıyor (10sn aralık, sıfır API maliyeti)")
+
+    while True:
+        if _live_price['price'] > 0:
+            socketio.emit('price_tick', {
+                'price': _live_price['price'],
+                'timestamp': _live_price['ts'],
+                'active_positions': [
+                    {
+                        'trend': p['trend'], 'entry': p['entry'],
+                        'sl': p['sl'], 'tp1': p['tp1'], 'tp2': p['tp2'],
+                        'lot': p.get('lot', 0.01), 'pattern': p.get('pattern', '')
+                    } for p in _active_positions
+                ]
+            })
+
+        time.sleep(10)
 
 threading.Thread(target=_td_ws_stream, daemon=True).start()
 
