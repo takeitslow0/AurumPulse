@@ -4,246 +4,578 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AurumPulse — Kripto Terminal</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.44.0/dist/apexcharts.min.js"></script>
   <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     :root{
-      --gold:#D4A843;--green:#22C55E;--red:#EF4444;--blue:#3B82F6;
-      --bg:#0a0b0e;--bg2:#12141a;--bg3:#1a1d25;
-      --border:#1e2130;--text:#e8ecf1;--text2:#8892a4;
-      --font:'JetBrains Mono',monospace;
+      --gold:#D4A843;--gold-dim:rgba(212,168,67,0.15);
+      --green:#22C55E;--green-dim:rgba(34,197,94,0.12);
+      --red:#EF4444;--red-dim:rgba(239,68,68,0.12);
+      --blue:#3B82F6;--blue-dim:rgba(59,130,246,0.12);
+      --purple:#A855F7;--purple-dim:rgba(168,85,247,0.12);
+      --orange:#F59E0B;--orange-dim:rgba(245,158,11,0.12);
+      --bg:#0B0D11;--bg2:#11131A;--bg3:#181B24;
+      --card:rgba(17,19,26,0.85);--card-border:rgba(255,255,255,0.06);
+      --text:#F1F5F9;--text2:#94A3B8;--text3:#475569;
+      --mono:'JetBrains Mono',monospace;--sans:'Inter',sans-serif;
     }
-    html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overflow-x:hidden}
+    html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);overflow:hidden}
 
-    .app{display:flex;flex-direction:column;height:100vh;padding:16px;gap:12px}
+    .app{display:flex;height:100vh}
 
-    /* TOP BAR */
-    .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--bg2);border:1px solid var(--border);border-radius:10px}
-    .topbar-left{display:flex;align-items:center;gap:16px}
-    .logo{color:var(--blue);font-weight:700;font-size:18px}
-    .pair{font-size:13px;color:var(--text2)}
-    .nav-links{display:flex;gap:12px}
-    .nav-links a{color:var(--text2);text-decoration:none;font-size:12px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);transition:all .2s}
-    .nav-links a:hover,.nav-links a.active{color:var(--blue);border-color:var(--blue)}
+    /* SIDEBAR */
+    .sidebar{width:56px;background:var(--bg2);border-right:1px solid var(--card-border);display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:4px;z-index:50;transition:width .25s}
+    .sidebar:hover{width:180px}
+    .sidebar:hover .nav-label{opacity:1}
+    .nav-label{opacity:0;transition:opacity .2s;white-space:nowrap;font-size:12px;font-weight:500}
+    .logo{font-size:20px;margin-bottom:16px;cursor:default}
+    .nav-item{display:flex;align-items:center;gap:10px;width:100%;padding:10px 16px;border:none;background:transparent;color:var(--text3);cursor:pointer;font-family:var(--sans);font-size:13px;border-radius:0;transition:all .15s;text-decoration:none}
+    .nav-item:hover{background:rgba(255,255,255,0.04);color:var(--text2)}
+    .nav-item.active{color:var(--purple);background:var(--purple-dim);border-right:2px solid var(--purple)}
+    .nav-spacer{flex:1}
+    .nav-icon{font-size:16px;min-width:24px;text-align:center}
 
-    /* COIN CARDS */
-    .coins-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-    .coin-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;cursor:pointer;transition:all .2s}
-    .coin-card:hover,.coin-card.active{border-color:var(--blue)}
-    .coin-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-    .coin-name{font-size:14px;font-weight:600}
-    .coin-icon{font-size:20px}
-    .coin-price{font-size:24px;font-weight:700;margin-bottom:4px}
-    .coin-change{font-size:12px;font-weight:600}
+    /* MAIN */
+    .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 
-    /* MAIN GRID */
-    .main-grid{display:grid;grid-template-columns:1fr 340px;gap:12px;flex:1;min-height:0}
-
-    /* PANEL */
-    .panel{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;overflow:auto}
-    .panel-title{font-size:13px;font-weight:600;color:var(--blue);margin-bottom:12px;text-transform:uppercase;letter-spacing:1px}
-    table{width:100%;border-collapse:collapse;font-size:12px}
-    th{color:var(--text2);font-weight:500;text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
-    td{padding:8px;border-bottom:1px solid rgba(30,33,48,0.5)}
-    .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
-    .tag-long{color:var(--green);background:rgba(34,197,94,0.12)}
-    .tag-short{color:var(--red);background:rgba(239,68,68,0.12)}
-    .pnl-pos{color:var(--green);font-weight:600}
-    .pnl-neg{color:var(--red);font-weight:600}
-
-    .sidebar-right{display:flex;flex-direction:column;gap:12px}
-    .stat-box{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px}
-    .stat-label{font-size:11px;color:var(--text2);margin-bottom:4px}
-    .stat-val{font-size:22px;font-weight:700}
-
-    .empty{text-align:center;padding:40px;color:var(--text2);font-size:13px}
-    .live-dot{width:8px;height:8px;background:var(--green);border-radius:50%;display:inline-block;animation:pulse 2s infinite}
+    /* TOPBAR */
+    .topbar{display:flex;align-items:center;gap:16px;padding:10px 20px;border-bottom:1px solid var(--card-border);background:var(--bg2);min-height:52px;flex-wrap:wrap}
+    .topbar-title{font-size:16px;font-weight:700;color:var(--purple)}
+    .top-stats{display:flex;gap:20px;margin-left:auto;align-items:center}
+    .top-stat{display:flex;flex-direction:column;gap:1px}
+    .top-stat .label{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+    .top-stat .value{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--text2)}
+    .status-pill{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:10px;font-weight:600;font-family:var(--mono)}
+    .status-pill.live{background:var(--green-dim);color:var(--green)}
+    .status-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
-    .closed-list{display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto}
-    .closed-item{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg3);border-radius:6px;font-size:12px}
+    /* CONTENT */
+    .content{flex:1;overflow-y:auto;padding:16px 20px}
+    .content::-webkit-scrollbar{width:4px}
+    .content::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:2px}
 
-    ::-webkit-scrollbar{width:4px}
-    ::-webkit-scrollbar-track{background:var(--bg)}
-    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+    /* COIN GRID */
+    .coin-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px}
+    @media(max-width:900px){.coin-grid{grid-template-columns:1fr}}
+
+    /* COIN CARD */
+    .coin-card{background:var(--card);border:1px solid var(--card-border);border-radius:12px;padding:16px;cursor:pointer;transition:all .2s}
+    .coin-card:hover{border-color:rgba(255,255,255,0.12);transform:translateY(-1px)}
+    .coin-card.selected{border-color:var(--purple);box-shadow:0 0 20px rgba(168,85,247,0.1)}
+    .coin-header{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+    .coin-icon{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700}
+    .coin-icon.btc{background:rgba(247,147,26,0.15);color:#F7931A}
+    .coin-icon.eth{background:rgba(98,126,234,0.15);color:#627EEA}
+    .coin-icon.sol{background:rgba(156,106,222,0.15);color:#9C6ADE}
+    .coin-icon.xrp{background:rgba(35,41,47,0.5);color:#fff}
+    .coin-name{font-size:14px;font-weight:600}
+    .coin-symbol{font-size:11px;color:var(--text3);font-family:var(--mono)}
+    .coin-price{font-family:var(--mono);font-size:22px;font-weight:700;margin-bottom:4px}
+    .coin-change{font-family:var(--mono);font-size:12px;font-weight:600}
+    .coin-signal{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--card-border)}
+    .signal-badge{padding:3px 8px;border-radius:4px;font-size:10px;font-weight:700;font-family:var(--mono)}
+    .signal-badge.long{background:var(--green-dim);color:var(--green)}
+    .signal-badge.short{background:var(--red-dim);color:var(--red)}
+    .signal-badge.neutral{background:rgba(255,255,255,0.05);color:var(--text3)}
+    .signal-conf{font-size:11px;color:var(--text3);margin-left:auto;font-family:var(--mono)}
+    .coin-positions{font-size:10px;color:var(--text3);font-family:var(--mono)}
+
+    /* DETAIL PANEL */
+    .detail-panel{background:var(--card);border:1px solid var(--card-border);border-radius:12px;margin-bottom:16px;overflow:hidden}
+    .detail-header{display:flex;align-items:center;gap:12px;padding:16px;border-bottom:1px solid var(--card-border)}
+    .detail-title{font-size:18px;font-weight:700}
+    .detail-body{padding:16px}
+
+    /* INTERVAL TABS */
+    .interval-tabs{display:flex;gap:4px;margin-bottom:12px}
+    .interval-tab{padding:4px 10px;border:1px solid var(--card-border);background:transparent;color:var(--text3);border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:10px;font-weight:500;transition:all .15s}
+    .interval-tab:hover{border-color:var(--purple);color:var(--purple)}
+    .interval-tab.active{background:var(--purple-dim);border-color:var(--purple);color:var(--purple)}
+
+    /* SIGNAL DETAIL */
+    .signal-detail{background:var(--bg3);border-radius:10px;padding:16px;margin-bottom:12px}
+    .signal-detail.buy{border-left:3px solid var(--green)}
+    .signal-detail.sell{border-left:3px solid var(--red)}
+    .signal-detail.neutral{border-left:3px solid var(--text3)}
+    .sd-direction{font-size:20px;font-weight:700;margin-bottom:4px}
+    .sd-direction.buy{color:var(--green)}
+    .sd-direction.sell{color:var(--red)}
+    .sd-direction.neutral{color:var(--text3)}
+    .sd-levels{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+    .sd-level{text-align:center}
+    .sd-level .lbl{font-size:9px;color:var(--text3);text-transform:uppercase;margin-bottom:2px}
+    .sd-level .val{font-family:var(--mono);font-size:13px;font-weight:600}
+    .sd-level .val.entry{color:var(--gold)}
+    .sd-level .val.sl{color:var(--red)}
+    .sd-level .val.tp{color:var(--green)}
+
+    /* REASONS */
+    .reasons{margin-top:10px}
+    .reason-item{font-size:11px;color:var(--text2);padding:3px 0;display:flex;align-items:center;gap:6px}
+    .reason-dot{width:4px;height:4px;border-radius:50%;background:var(--purple);flex-shrink:0}
+
+    /* POSITIONS */
+    .pos-section{margin-top:12px}
+    .pos-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:8px}
+    .pos-item{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11px;padding:8px 10px;background:rgba(255,255,255,0.02);border-radius:6px;margin-bottom:4px}
+    .dir-badge{padding:2px 8px;border-radius:4px;font-weight:700;font-size:10px}
+    .dir-badge.long{background:var(--green-dim);color:var(--green)}
+    .dir-badge.short{background:var(--red-dim);color:var(--red)}
+    .pos-pnl{margin-left:auto;font-weight:700;font-size:13px}
+
+    /* TRADES TABLE */
+    .trades-section{margin-top:16px}
+    .data-table{width:100%;border-collapse:collapse;font-size:11px}
+    .data-table th{text-align:left;padding:8px 10px;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.3px;border-bottom:1px solid var(--card-border);font-weight:600}
+    .data-table td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.02);font-family:var(--mono);font-size:11px}
+    .tag{display:inline-block;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600}
+    .tag.long{background:var(--green-dim);color:var(--green)}
+    .tag.short{background:var(--red-dim);color:var(--red)}
+    .pnl-plus{color:var(--green);font-weight:700}
+    .pnl-minus{color:var(--red);font-weight:700}
+
+    /* CHART */
+    .chart-wrap{background:var(--bg3);border-radius:8px;padding:8px;margin-bottom:12px;min-height:320px}
+
+    /* GRID HELPERS */
+    .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .card{background:var(--card);border:1px solid var(--card-border);border-radius:10px;padding:16px}
+    .card-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:10px}
+    .metric-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.03)}
+    .metric-row:last-child{border-bottom:none}
+    .metric-label{font-size:12px;color:var(--text3)}
+    .metric-value{font-family:var(--mono);font-size:12px;font-weight:500}
+
+    /* RESET BTN */
+    .btn{padding:8px 16px;border-radius:6px;border:none;cursor:pointer;font-family:var(--sans);font-size:12px;font-weight:600;transition:all .15s}
+    .btn-danger{background:var(--red);color:white}.btn-danger:hover{background:#DC2626}
+    .btn-ghost{background:transparent;border:1px solid var(--card-border);color:var(--text2)}.btn-ghost:hover{background:rgba(255,255,255,0.05)}
+
+    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:center;justify-content:center}
+    .modal-overlay.active{display:flex}
+    .modal-box{background:var(--bg3);border:1px solid var(--card-border);border-radius:12px;padding:24px;max-width:360px;text-align:center}
+    .modal-box h3{margin-bottom:8px;font-size:16px}
+    .modal-box p{color:var(--text2);font-size:13px;margin-bottom:16px}
+    .modal-actions{display:flex;gap:8px;justify-content:center}
   </style>
 </head>
 <body>
-  <div class="app">
-    <!-- TOP BAR -->
+<div class="app">
+  <!-- SIDEBAR -->
+  <nav class="sidebar">
+    <div class="logo">💎</div>
+    <a href="/" class="nav-item"><span class="nav-icon">🥇</span><span class="nav-label">Gold</span></a>
+    <a href="/crypto" class="nav-item active"><span class="nav-icon">🪙</span><span class="nav-label">Kripto</span></a>
+    <div class="nav-spacer"></div>
+    <button class="nav-item" onclick="showResetModal()"><span class="nav-icon">🔄</span><span class="nav-label">Reset</span></button>
+  </nav>
+
+  <!-- MAIN -->
+  <div class="main">
+    <!-- TOPBAR -->
     <div class="topbar">
-      <div class="topbar-left">
-        <span class="logo">Kripto</span>
-        <span class="pair">BTC / ETH / SOL / XRP</span>
-        <span class="live-dot"></span>
+      <span class="topbar-title">🪙 Kripto Terminal</span>
+      <div class="interval-tabs">
+        <button class="interval-tab active" onclick="changeInterval('1m')">1D</button>
+        <button class="interval-tab" onclick="changeInterval('5m')">5D</button>
+        <button class="interval-tab" onclick="changeInterval('15m')">15D</button>
+        <button class="interval-tab" onclick="changeInterval('1h')">1S</button>
       </div>
-      <div class="nav-links">
-        <a href="/">Gold</a>
-        <a href="/crypto" class="active">Kripto</a>
+      <div class="top-stats">
+        <div class="top-stat">
+          <span class="label">Bakiye</span>
+          <span class="value" id="balance">$500.00</span>
+        </div>
+        <div class="top-stat">
+          <span class="label">Toplam PnL</span>
+          <span class="value" id="totalPnl">$0.00</span>
+        </div>
+        <div class="top-stat">
+          <span class="label">Trade</span>
+          <span class="value" id="tradeCount">0</span>
+        </div>
+        <div class="status-pill live">
+          <span class="dot"></span>
+          <span id="statusText">Binance</span>
+        </div>
       </div>
     </div>
 
-    <!-- COIN CARDS -->
-    <div class="coins-grid">
-      <div class="coin-card active" data-symbol="BTCUSDT">
-        <div class="coin-header">
-          <span class="coin-name">Bitcoin</span>
-          <span class="coin-icon">&#8383;</span>
+    <!-- CONTENT -->
+    <div class="content">
+      <!-- COIN GRID -->
+      <div class="coin-grid" id="coinGrid">
+        <div class="coin-card" data-symbol="BTCUSDT" onclick="selectCoin('BTCUSDT')">
+          <div class="coin-header">
+            <div class="coin-icon btc">₿</div>
+            <div><div class="coin-name">Bitcoin</div><div class="coin-symbol">BTC/USDT</div></div>
+          </div>
+          <div class="coin-price" id="price_BTCUSDT">--</div>
+          <div class="coin-signal">
+            <span class="signal-badge neutral" id="sig_BTCUSDT">BEKLE</span>
+            <span class="signal-conf" id="conf_BTCUSDT">--%</span>
+            <span class="coin-positions" id="pos_BTCUSDT"></span>
+          </div>
         </div>
-        <div class="coin-price" id="price-BTCUSDT">--</div>
-        <div class="coin-change" id="signal-BTCUSDT">--</div>
-      </div>
-      <div class="coin-card" data-symbol="ETHUSDT">
-        <div class="coin-header">
-          <span class="coin-name">Ethereum</span>
-          <span class="coin-icon">&Xi;</span>
+        <div class="coin-card" data-symbol="ETHUSDT" onclick="selectCoin('ETHUSDT')">
+          <div class="coin-header">
+            <div class="coin-icon eth">Ξ</div>
+            <div><div class="coin-name">Ethereum</div><div class="coin-symbol">ETH/USDT</div></div>
+          </div>
+          <div class="coin-price" id="price_ETHUSDT">--</div>
+          <div class="coin-signal">
+            <span class="signal-badge neutral" id="sig_ETHUSDT">BEKLE</span>
+            <span class="signal-conf" id="conf_ETHUSDT">--%</span>
+            <span class="coin-positions" id="pos_ETHUSDT"></span>
+          </div>
         </div>
-        <div class="coin-price" id="price-ETHUSDT">--</div>
-        <div class="coin-change" id="signal-ETHUSDT">--</div>
-      </div>
-      <div class="coin-card" data-symbol="SOLUSDT">
-        <div class="coin-header">
-          <span class="coin-name">Solana</span>
-          <span class="coin-icon">&#9678;</span>
+        <div class="coin-card" data-symbol="SOLUSDT" onclick="selectCoin('SOLUSDT')">
+          <div class="coin-header">
+            <div class="coin-icon sol">◎</div>
+            <div><div class="coin-name">Solana</div><div class="coin-symbol">SOL/USDT</div></div>
+          </div>
+          <div class="coin-price" id="price_SOLUSDT">--</div>
+          <div class="coin-signal">
+            <span class="signal-badge neutral" id="sig_SOLUSDT">BEKLE</span>
+            <span class="signal-conf" id="conf_SOLUSDT">--%</span>
+            <span class="coin-positions" id="pos_SOLUSDT"></span>
+          </div>
         </div>
-        <div class="coin-price" id="price-SOLUSDT">--</div>
-        <div class="coin-change" id="signal-SOLUSDT">--</div>
-      </div>
-      <div class="coin-card" data-symbol="XRPUSDT">
-        <div class="coin-header">
-          <span class="coin-name">XRP</span>
-          <span class="coin-icon">&#10005;</span>
+        <div class="coin-card" data-symbol="XRPUSDT" onclick="selectCoin('XRPUSDT')">
+          <div class="coin-header">
+            <div class="coin-icon xrp">✕</div>
+            <div><div class="coin-name">XRP</div><div class="coin-symbol">XRP/USDT</div></div>
+          </div>
+          <div class="coin-price" id="price_XRPUSDT">--</div>
+          <div class="coin-signal">
+            <span class="signal-badge neutral" id="sig_XRPUSDT">BEKLE</span>
+            <span class="signal-conf" id="conf_XRPUSDT">--%</span>
+            <span class="coin-positions" id="pos_XRPUSDT"></span>
+          </div>
         </div>
-        <div class="coin-price" id="price-XRPUSDT">--</div>
-        <div class="coin-change" id="signal-XRPUSDT">--</div>
-      </div>
-    </div>
-
-    <!-- MAIN GRID -->
-    <div class="main-grid">
-      <div class="panel">
-        <div class="panel-title">Kripto Pozisyonlar</div>
-        <table>
-          <thead>
-            <tr>
-              <th>Coin</th>
-              <th>Tip</th>
-              <th>Giris</th>
-              <th>SL</th>
-              <th>TP</th>
-              <th>P/L</th>
-            </tr>
-          </thead>
-          <tbody id="cryptoPositions">
-            <tr><td colspan="6" class="empty">Sinyal bekleniyor...</td></tr>
-          </tbody>
-        </table>
       </div>
 
-      <div class="sidebar-right">
-        <div class="stat-box">
-          <div class="stat-label">Kripto Bakiye</div>
-          <div id="cryptoBalance" class="stat-val">$1,000.00</div>
+      <!-- DETAIL PANEL -->
+      <div class="detail-panel" id="detailPanel" style="display:none">
+        <div class="detail-header">
+          <span id="detailIcon" style="font-size:24px"></span>
+          <div>
+            <div class="detail-title" id="detailTitle">--</div>
+            <div style="font-size:11px;color:var(--text3);font-family:var(--mono)" id="detailSymbol">--</div>
+          </div>
+          <div style="margin-left:auto;text-align:right">
+            <div style="font-family:var(--mono);font-size:22px;font-weight:700" id="detailPrice">--</div>
+          </div>
         </div>
-        <div class="stat-box">
-          <div class="stat-label">Toplam P/L</div>
-          <div id="cryptoPnl" class="stat-val pnl-pos">$0.00</div>
-        </div>
-        <div class="panel" style="flex:1">
-          <div class="panel-title">Son Islemler</div>
-          <div id="cryptoTrades" class="closed-list">
-            <div class="empty">Henuz islem yok</div>
+        <div class="detail-body">
+          <!-- SIGNAL -->
+          <div class="signal-detail neutral" id="signalCard">
+            <div class="sd-direction neutral" id="sdDirection">BEKLE ⚪</div>
+            <div style="font-size:12px;color:var(--text2);margin-bottom:6px" id="sdConfidence">Güven: --%</div>
+            <div class="sd-levels">
+              <div class="sd-level"><div class="lbl">Entry</div><div class="val entry" id="sdEntry">--</div></div>
+              <div class="sd-level"><div class="lbl">Stop Loss</div><div class="val sl" id="sdSL">--</div></div>
+              <div class="sd-level"><div class="lbl">TP1</div><div class="val tp" id="sdTP1">--</div></div>
+              <div class="sd-level"><div class="lbl">TP2</div><div class="val tp" id="sdTP2">--</div></div>
+            </div>
+            <div class="reasons" id="sdReasons"></div>
+          </div>
+
+          <!-- CHART -->
+          <div class="chart-wrap"><div id="coinChart"></div></div>
+          <div class="chart-wrap" style="min-height:140px"><div id="rsiChart"></div></div>
+
+          <!-- POSITIONS -->
+          <div class="pos-section" id="posSection" style="display:none">
+            <div class="pos-title">Aktif Pozisyonlar</div>
+            <div id="positionsList"></div>
+          </div>
+
+          <!-- INDICATORS -->
+          <div class="grid-2" style="margin-top:12px">
+            <div class="card">
+              <div class="card-title">Indikatörler</div>
+              <div class="metric-row"><span class="metric-label">RSI (14)</span><span class="metric-value" id="indRSI">--</span></div>
+              <div class="metric-row"><span class="metric-label">MACD Hist</span><span class="metric-value" id="indMACD">--</span></div>
+              <div class="metric-row"><span class="metric-label">EMA 20</span><span class="metric-value" id="indEMA20">--</span></div>
+              <div class="metric-row"><span class="metric-label">EMA 50</span><span class="metric-value" id="indEMA50">--</span></div>
+              <div class="metric-row"><span class="metric-label">ATR</span><span class="metric-value" id="indATR">--</span></div>
+            </div>
+            <div class="card">
+              <div class="card-title">Bollinger Bands</div>
+              <div class="metric-row"><span class="metric-label">Üst Band</span><span class="metric-value" id="indBBUp">--</span></div>
+              <div class="metric-row"><span class="metric-label">Alt Band</span><span class="metric-value" id="indBBLow">--</span></div>
+              <div class="metric-row"><span class="metric-label">Skor</span><span class="metric-value" id="indScore">--</span></div>
+              <div class="metric-row"><span class="metric-label">Hacim</span><span class="metric-value" id="indVol">--</span></div>
+            </div>
+          </div>
+
+          <!-- TRADE HISTORY -->
+          <div class="trades-section" style="margin-top:16px">
+            <div class="card">
+              <div class="card-title">Son Tradeler</div>
+              <table class="data-table" id="tradeTable">
+                <thead><tr><th>Yön</th><th>Giriş</th><th>Çıkış</th><th>PnL</th><th>Sebep</th></tr></thead>
+                <tbody id="tradeBody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
     </div>
   </div>
+</div>
 
-  <script>
-    const API = window.location.origin;
-    const socket = io(API, {transports: ['websocket', 'polling']});
+<!-- RESET MODAL -->
+<div class="modal-overlay" id="resetModal">
+  <div class="modal-box">
+    <h3>Kripto Simülasyon Sıfırla</h3>
+    <p>Tüm pozisyonlar kapatılacak ve bakiye $500'e dönecek.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeResetModal()">Vazgeç</button>
+      <button class="btn btn-danger" onclick="resetSim()">Sıfırla</button>
+    </div>
+  </div>
+</div>
 
-    // Coin cards click
-    document.querySelectorAll('.coin-card').forEach(card => {
-      card.addEventListener('click', () => {
-        document.querySelectorAll('.coin-card').forEach(c => c.classList.remove('active'));
-        card.classList.add('active');
-      });
-    });
+<script>
+const API_BASE = window.location.origin;
+let currentInterval = '1m';
+let selectedCoin = null;
+let coinChart = null;
+let rsiChart = null;
+let _socket = null;
 
-    // Fetch crypto data
-    async function fetchCryptoData() {
-      try {
-        const res = await fetch(API + '/api/crypto/market_data');
-        const data = await res.json();
+// ═══ SOCKET.IO ═══
+try {
+  _socket = io({ transports: ['polling', 'websocket'], reconnection: true, reconnectionDelay: 2000, timeout: 20000 });
+  _socket.on('connect', () => { document.getElementById('statusText').textContent = 'Binance CANLI'; });
+  _socket.on('disconnect', () => { document.getElementById('statusText').textContent = 'Bağlantı kesildi'; });
+  _socket.on('crypto_update', (data) => {
+    if (!data || !data.signals) return;
+    updateCoinGrid(data.signals);
+    document.getElementById('balance').textContent = '$' + (data.balance || 0).toFixed(2);
+  });
+} catch(e) { console.log('Socket.IO hatası:', e); }
 
-        for (const [symbol, info] of Object.entries(data)) {
-          const priceEl = document.getElementById('price-' + symbol);
-          const sigEl = document.getElementById('signal-' + symbol);
-          if (priceEl && info.price) {
-            priceEl.textContent = '$' + Number(info.price).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-            priceEl.style.color = info.change_24h >= 0 ? 'var(--green)' : 'var(--red)';
-          }
-          if (sigEl && info.signal) {
-            sigEl.textContent = info.signal.trend || '--';
-            sigEl.style.color = info.signal.trend === 'bullish' ? 'var(--green)' : info.signal.trend === 'bearish' ? 'var(--red)' : 'var(--text2)';
-          }
-        }
-      } catch(e) { console.error('Crypto fetch error:', e); }
-
-      try {
-        const res2 = await fetch(API + '/api/crypto/trades');
-        const data2 = await res2.json();
-        document.getElementById('cryptoBalance').textContent = '$' + (data2.balance || 1000).toFixed(2);
-
-        const totalPnl = (data2.trades || []).reduce((sum, t) => sum + (t.pnl || 0), 0);
-        const pnlEl = document.getElementById('cryptoPnl');
-        pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
-        pnlEl.className = 'stat-val ' + (totalPnl >= 0 ? 'pnl-pos' : 'pnl-neg');
-
-        const tradesEl = document.getElementById('cryptoTrades');
-        const trades = (data2.trades || []).slice(-10).reverse();
-        if (trades.length === 0) {
-          tradesEl.innerHTML = '<div class="empty">Henuz islem yok</div>';
-        } else {
-          tradesEl.innerHTML = trades.map(t => `
-            <div class="closed-item">
-              <span style="font-weight:600">${t.symbol || '--'}</span>
-              <span style="color:${t.trend === 'bullish' ? 'var(--green)' : 'var(--red)'}">${t.trend === 'bullish' ? 'LONG' : 'SHORT'}</span>
-              <span class="${(t.pnl||0) >= 0 ? 'pnl-pos' : 'pnl-neg'}">${(t.pnl||0) >= 0 ? '+' : ''}$${(t.pnl||0).toFixed(2)}</span>
-            </div>
-          `).join('');
-        }
-      } catch(e) {}
+// ═══ COIN GRID UPDATE ═══
+function updateCoinGrid(signals) {
+  for (const [symbol, sig] of Object.entries(signals)) {
+    const priceEl = document.getElementById('price_' + symbol);
+    const sigEl = document.getElementById('sig_' + symbol);
+    const confEl = document.getElementById('conf_' + symbol);
+    const posEl = document.getElementById('pos_' + symbol);
+    if (priceEl) priceEl.textContent = '$' + sig.price.toLocaleString('en-US', {minimumFractionDigits: 2});
+    if (sigEl) {
+      sigEl.textContent = sig.trend === 'bullish' ? 'LONG' : sig.trend === 'bearish' ? 'SHORT' : 'BEKLE';
+      sigEl.className = 'signal-badge ' + (sig.trend === 'bullish' ? 'long' : sig.trend === 'bearish' ? 'short' : 'neutral');
     }
+    if (confEl) confEl.textContent = sig.confidence + '%';
+    if (posEl && sig.positions > 0) posEl.textContent = sig.positions + ' poz';
+    else if (posEl) posEl.textContent = '';
+  }
+}
 
-    // Crypto positions
-    socket.on('crypto_update', (data) => {
-      if (data && data.positions) {
-        const tbody = document.getElementById('cryptoPositions');
-        const positions = Object.values(data.positions);
-        if (positions.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="6" class="empty">Sinyal bekleniyor...</td></tr>';
-        } else {
-          tbody.innerHTML = positions.map(p => `
-            <tr>
-              <td style="font-weight:600">${p.symbol || '--'}</td>
-              <td><span class="tag ${p.trend === 'bullish' ? 'tag-long' : 'tag-short'}">${p.trend === 'bullish' ? 'LONG' : 'SHORT'}</span></td>
-              <td>$${(p.entry||0).toFixed(2)}</td>
-              <td style="color:var(--red)">$${(p.sl||0).toFixed(2)}</td>
-              <td style="color:var(--green)">$${(p.tp||0).toFixed(2)}</td>
-              <td class="${(p.pnl||0) >= 0 ? 'pnl-pos' : 'pnl-neg'}">${(p.pnl||0) >= 0 ? '+' : ''}$${(p.pnl||0).toFixed(2)}</td>
-            </tr>
-          `).join('');
-        }
+// ═══ SELECT COIN ═══
+function selectCoin(symbol) {
+  selectedCoin = symbol;
+  document.querySelectorAll('.coin-card').forEach(c => c.classList.remove('selected'));
+  const card = document.querySelector(`.coin-card[data-symbol="${symbol}"]`);
+  if (card) card.classList.add('selected');
+  document.getElementById('detailPanel').style.display = 'block';
+  loadCoinDetail(symbol);
+}
+
+// ═══ LOAD COIN DETAIL ═══
+async function loadCoinDetail(symbol) {
+  try {
+    const res = await fetch(`${API_BASE}/api/crypto/coin/${symbol}?interval=${currentInterval}`);
+    const d = await res.json();
+    if (d.error) return;
+
+    const meta = {BTCUSDT:{icon:'₿',name:'Bitcoin',cls:'btc'},ETHUSDT:{icon:'Ξ',name:'Ethereum',cls:'eth'},SOLUSDT:{icon:'◎',name:'Solana',cls:'sol'},XRPUSDT:{icon:'✕',name:'XRP',cls:'xrp'}}[symbol]||{};
+
+    document.getElementById('detailIcon').textContent = meta.icon || '';
+    document.getElementById('detailTitle').textContent = meta.name || symbol;
+    document.getElementById('detailSymbol').textContent = symbol.replace('USDT', '/USDT');
+    document.getElementById('detailPrice').textContent = '$' + d.price.toLocaleString('en-US', {minimumFractionDigits: 2});
+
+    // Signal card
+    const sc = document.getElementById('signalCard');
+    const dir = document.getElementById('sdDirection');
+    if (d.trend === 'bullish') { sc.className = 'signal-detail buy'; dir.className = 'sd-direction buy'; dir.textContent = d.signal_type; }
+    else if (d.trend === 'bearish') { sc.className = 'signal-detail sell'; dir.className = 'sd-direction sell'; dir.textContent = d.signal_type; }
+    else { sc.className = 'signal-detail neutral'; dir.className = 'sd-direction neutral'; dir.textContent = 'BEKLE ⚪'; }
+
+    document.getElementById('sdConfidence').textContent = 'Güven: %' + d.confidence;
+    document.getElementById('sdEntry').textContent = '$' + d.price;
+    document.getElementById('sdSL').textContent = d.sl ? '$' + d.sl : '--';
+    document.getElementById('sdTP1').textContent = d.tp1 ? '$' + d.tp1 : '--';
+    document.getElementById('sdTP2').textContent = d.tp2 ? '$' + d.tp2 : '--';
+
+    // Reasons
+    const rDiv = document.getElementById('sdReasons');
+    rDiv.innerHTML = (d.reasons || []).map(r => `<div class="reason-item"><span class="reason-dot"></span>${r}</div>`).join('');
+
+    // Indicators
+    document.getElementById('indRSI').textContent = d.rsi;
+    document.getElementById('indMACD').textContent = d.macd_hist;
+    document.getElementById('indEMA20').textContent = '$' + d.ema20;
+    document.getElementById('indEMA50').textContent = '$' + d.ema50;
+    document.getElementById('indATR').textContent = d.atr;
+    document.getElementById('indBBUp').textContent = '$' + d.bb_up;
+    document.getElementById('indBBLow').textContent = '$' + d.bb_low;
+    document.getElementById('indScore').textContent = d.score;
+    document.getElementById('indVol').textContent = d.volume ? Number(d.volume).toLocaleString() : '--';
+
+    // Positions
+    const posSec = document.getElementById('posSection');
+    const posList = document.getElementById('positionsList');
+    if (d.positions && d.positions.length > 0) {
+      posSec.style.display = 'block';
+      posList.innerHTML = d.positions.map(p => {
+        const isBull = p.trend === 'bullish';
+        return `<div class="pos-item">
+          <span class="dir-badge ${isBull?'long':'short'}">${isBull?'LONG':'SHORT'}</span>
+          <span>Entry: <b>$${p.entry}</b></span>
+          <span>SL: <b style="color:var(--red)">$${p.sl}</b></span>
+          <span>TP1: <b style="color:var(--green)">$${p.tp1}</b></span>
+          <span class="pos-pnl" style="color:${p.pnl_usd>=0?'var(--green)':'var(--red)'}">${p.pnl_usd>=0?'+':''}$${p.pnl_usd.toFixed(2)}</span>
+        </div>`;
+      }).join('');
+    } else { posSec.style.display = 'none'; }
+
+    // Chart
+    renderCoinChart(d.candles || []);
+    renderRSIChart(d.rsi_data || []);
+
+    // Trades
+    const tbody = document.getElementById('tradeBody');
+    tbody.innerHTML = (d.trades || []).reverse().slice(0, 10).map(t => `<tr>
+      <td><span class="tag ${t.trend==='bullish'?'long':'short'}">${t.trend==='bullish'?'LONG':'SHORT'}</span></td>
+      <td>$${t.entry}</td>
+      <td>$${t.exit}</td>
+      <td class="${t.pnl_usd>=0?'pnl-plus':'pnl-minus'}">${t.pnl_usd>=0?'+':''}$${t.pnl_usd.toFixed(2)}</td>
+      <td>${t.reason}</td>
+    </tr>`).join('');
+
+    // Balance update
+    document.getElementById('balance').textContent = '$' + (d.balance || 0).toFixed(2);
+
+  } catch (e) { console.log('Coin detail error:', e); }
+}
+
+// ═══ CHARTS ═══
+function renderCoinChart(candles) {
+  if (coinChart) { coinChart.destroy(); coinChart = null; }
+  const el = document.getElementById('coinChart');
+  if (!el || candles.length === 0) return;
+  const opts = {
+    chart: { type: 'candlestick', height: 300, background: 'transparent',
+      toolbar: { show: true, tools: { download: false } },
+      animations: { enabled: false }
+    },
+    series: [{ data: candles }],
+    plotOptions: { candlestick: { colors: { upward: '#22C55E', downward: '#EF4444' } } },
+    xaxis: { type: 'datetime', labels: { style: { colors: '#475569', fontFamily: 'JetBrains Mono', fontSize: '10px' } } },
+    yaxis: { labels: { style: { colors: '#475569', fontFamily: 'JetBrains Mono', fontSize: '10px' },
+      formatter: v => '$' + v.toLocaleString('en-US', {minimumFractionDigits: 2}) },
+      tooltip: { enabled: true }
+    },
+    grid: { borderColor: 'rgba(255,255,255,0.04)', strokeDashArray: 2 },
+    theme: { mode: 'dark' },
+    tooltip: { theme: 'dark' }
+  };
+  coinChart = new ApexCharts(el, opts);
+  coinChart.render();
+}
+
+function renderRSIChart(rsiData) {
+  if (rsiChart) { rsiChart.destroy(); rsiChart = null; }
+  const el = document.getElementById('rsiChart');
+  if (!el || rsiData.length === 0) return;
+  const opts = {
+    chart: { type: 'line', height: 120, background: 'transparent', sparkline: { enabled: false },
+      toolbar: { show: false }, animations: { enabled: false }
+    },
+    series: [{ name: 'RSI', data: rsiData }],
+    colors: ['#A855F7'],
+    stroke: { width: 2 },
+    xaxis: { type: 'datetime', labels: { show: false } },
+    yaxis: { min: 0, max: 100, tickAmount: 4,
+      labels: { style: { colors: '#475569', fontFamily: 'JetBrains Mono', fontSize: '10px' } }
+    },
+    annotations: {
+      yaxis: [
+        { y: 70, borderColor: '#EF4444', strokeDashArray: 4, label: { text: '70', style: { color: '#EF4444', background: 'transparent', fontSize: '9px' } } },
+        { y: 30, borderColor: '#22C55E', strokeDashArray: 4, label: { text: '30', style: { color: '#22C55E', background: 'transparent', fontSize: '9px' } } }
+      ]
+    },
+    grid: { borderColor: 'rgba(255,255,255,0.04)' },
+    theme: { mode: 'dark' },
+    tooltip: { theme: 'dark' }
+  };
+  rsiChart = new ApexCharts(el, opts);
+  rsiChart.render();
+}
+
+// ═══ INTERVAL ═══
+function changeInterval(interval) {
+  currentInterval = interval;
+  document.querySelectorAll('.interval-tab').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  if (selectedCoin) loadCoinDetail(selectedCoin);
+  loadAllData();
+}
+
+// ═══ DATA LOADING ═══
+async function loadAllData() {
+  try {
+    const res = await fetch(`${API_BASE}/api/crypto/market_data?interval=${currentInterval}`);
+    const data = await res.json();
+    if (data.coins) {
+      const signals = {};
+      for (const [sym, coin] of Object.entries(data.coins)) {
+        signals[sym] = { price: coin.price, trend: coin.trend, signal_type: coin.signal_type,
+          confidence: coin.confidence, rsi: coin.rsi, positions: (coin.positions||[]).length };
       }
-    });
+      updateCoinGrid(signals);
+    }
+    document.getElementById('balance').textContent = '$' + (data.balance || 0).toFixed(2);
+    document.getElementById('tradeCount').textContent = data.total_trades || 0;
+  } catch(e) { console.log('Load error:', e); }
+}
 
-    // İlk yükleme
-    fetchCryptoData();
-    // 30 saniyede bir güncelle
-    setInterval(fetchCryptoData, 30000);
-  </script>
+async function loadTradeStats() {
+  try {
+    const res = await fetch(`${API_BASE}/api/crypto/trades`);
+    const data = await res.json();
+    document.getElementById('totalPnl').textContent = (data.total_pnl >= 0 ? '+$' : '-$') + Math.abs(data.total_pnl || 0).toFixed(2);
+    document.getElementById('totalPnl').style.color = (data.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('tradeCount').textContent = data.total_trades || 0;
+  } catch(e) {}
+}
+
+// ═══ RESET ═══
+function showResetModal() { document.getElementById('resetModal').classList.add('active'); }
+function closeResetModal() { document.getElementById('resetModal').classList.remove('active'); }
+async function resetSim() {
+  try { await fetch(`${API_BASE}/api/crypto/reset`, { method: 'POST' }); } catch(e) {}
+  closeResetModal();
+  loadAllData();
+  loadTradeStats();
+  if (selectedCoin) loadCoinDetail(selectedCoin);
+}
+
+// ═══ INIT ═══
+loadAllData();
+loadTradeStats();
+setInterval(loadAllData, 30000);
+setInterval(loadTradeStats, 60000);
+setInterval(() => { if (selectedCoin) loadCoinDetail(selectedCoin); }, 30000);
+</script>
 </body>
 </html>
