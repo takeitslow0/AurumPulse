@@ -298,50 +298,82 @@ def fetch_live_gold_price():
 
 
 # ── HIZLI FİYAT GÜNCELLEME THREAD'İ ──
-# Binance PAXG limitsiz, 2 saniyede bir fiyat çeker
+# Çoklu kaynak: gold-api.com (limitsiz) + Binance PAXG + TwelveData cache
 def _gold_price_updater():
-    """2 saniyede bir Binance PAXG'den gold fiyatını günceller + frontend'e push eder."""
+    """3 saniyede bir çoklu kaynaktan gold fiyatını günceller + frontend'e push eder."""
     time.sleep(5)
     _err_count = 0
     _prev_price = 0
+    _tick_count = 0
     while True:
         try:
-            p = _fetch_gold_from("paxg-fast", "https://api.binance.us/api/v3/ticker/price",
-                                 {"symbol": "PAXGUSDT"},
-                                 lambda d: float(d['price']) if d and 'price' in d else 0)
-            if p > 0:
-                td_price = _live_gold.get('_td_last', 0)
-                if td_price > 0 and abs(td_price - p) < 100:
-                    final_price = round((p + td_price) / 2, 2)
-                    src = "avg(paxg+td)"
-                else:
-                    final_price = round(p + 12, 2)
-                    src = "paxg+offset"
+            _tick_count += 1
+            final_price = 0
+            src = ""
 
-                _live_gold['price'] = final_price
-                _live_gold['source'] = src
-                _live_gold['ts'] = time.time()
-                _err_count = 0
+            # ── KAYNAK 1: gold-api.com (ücretsiz, limitsiz, API key yok) ──
+            gp = _fetch_gold_from("gold-api", "https://gold-api.com/api/price/XAU",
+                                  None,
+                                  lambda d: float(d.get('price', 0)) if d else 0)
 
-                # Pozisyon P/L güncelle + price_tick gönder
-                _check_simulation_positions(final_price)
+            # ── KAYNAK 2: Binance PAXG (ücretsiz, limitsiz, ~$12 düşük) ──
+            paxg = _fetch_gold_from("paxg", "https://api.binance.us/api/v3/ticker/price",
+                                    {"symbol": "PAXGUSDT"},
+                                    lambda d: float(d['price']) if d and 'price' in d else 0)
+            if paxg > 0:
+                paxg = round(paxg + 12, 2)  # Offset düzeltmesi
 
-                change = round(final_price - _prev_price, 2) if _prev_price > 0 else 0
-                _prev_price = final_price
+            # ── KAYNAK 3: TwelveData cache (scanner'dan) ──
+            td_price = _live_gold.get('_td_last', 0)
 
-                socketio.emit('price_tick', {
-                    'price': final_price,
-                    'change': change,
-                    'source': src,
-                    'timestamp': int(time.time() * 1000),
-                    'positions': _get_positions_snapshot(final_price),
-                    'daily_pnl': _get_daily_pnl(),
-                })
+            # ── EN İYİ FİYATI SEÇ ──
+            prices = {}
+            if gp > 1000:
+                prices['gold-api'] = gp
+            if paxg > 1000:
+                prices['paxg'] = paxg
+            if td_price > 1000:
+                prices['td'] = td_price
+
+            if len(prices) >= 2:
+                # Birden fazla kaynak → ortalama
+                final_price = round(sum(prices.values()) / len(prices), 2)
+                src = f"avg({'+'.join(prices.keys())})"
+            elif len(prices) == 1:
+                name, val = list(prices.items())[0]
+                final_price = val
+                src = name
+            else:
+                # Hiçbir kaynak çalışmadı
+                if _tick_count <= 3:
+                    print(f"⚠️ Updater: hiçbir kaynak çalışmadı")
+                time.sleep(3)
+                continue
+
+            _live_gold['price'] = final_price
+            _live_gold['source'] = src
+            _live_gold['ts'] = time.time()
+            _err_count = 0
+
+            # Pozisyon SL/TP kontrolü
+            _check_simulation_positions(final_price)
+
+            change = round(final_price - _prev_price, 2) if _prev_price > 0 else 0
+            _prev_price = final_price
+
+            socketio.emit('price_tick', {
+                'price': final_price,
+                'change': change,
+                'source': src,
+                'timestamp': int(time.time() * 1000),
+                'positions': _get_positions_snapshot(final_price),
+                'daily_pnl': _get_daily_pnl(),
+            })
         except Exception as e:
             _err_count += 1
             if _err_count <= 3:
                 print(f"⚠️ Gold price updater hatası: {e}")
-        time.sleep(2)  # 2 saniye — Binance limitsiz
+        time.sleep(3)  # 3 saniye — gold-api.com + PAXG limitsiz
 
 threading.Thread(target=_gold_price_updater, daemon=True).start()
 
