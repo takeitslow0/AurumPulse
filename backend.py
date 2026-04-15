@@ -230,50 +230,78 @@ def get_validated_interval(p):
 # ─────────────────────────────────────────
 _live_gold = {'price': 0, 'source': '', 'ts': 0}
 
+_gold_source_errors = {}  # Kaynak bazlı hata sayacı
+
 def fetch_live_gold_price():
-    """Birden fazla ücretsiz kaynaktan anlık gold fiyatı çeker.
-    TwelveData free plan 15dk gecikeli olabiliyor, bu yüzden
-    önce gerçek zamanlı kaynaklari dener."""
+    """Birden fazla ücretsiz kaynaktan anlık gold fiyatı çeker."""
     global _live_gold
 
-    # Kaynak 1: Gold-API.com (ücretsiz, key gereksiz)
-    try:
-        resp = requests.get("https://gold-api.com/api/price/XAU", timeout=8)
-        data = resp.json()
-        if data and 'price' in data:
-            p = float(data['price'])
+    sources = [
+        # (isim, url, params, price_extractor)
+
+        # Binance PAXGUSDT (altın-backed token, gerçek zamanlı, ücretsiz)
+        ("binance-paxg",
+         "https://api.binance.us/api/v3/ticker/price",
+         {"symbol": "PAXGUSDT"},
+         lambda d: float(d['price']) if d and 'price' in d else 0),
+
+        ("binance-paxg-global",
+         "https://api.binance.com/api/v3/ticker/price",
+         {"symbol": "PAXGUSDT"},
+         lambda d: float(d['price']) if d and 'price' in d else 0),
+
+        # TwelveData (API key var, güvenilir ama gecikeli olabilir)
+        ("twelvedata",
+         f"{TD_BASE_URL}/price",
+         {"symbol": "XAU/USD", "apikey": TD_API_KEY},
+         lambda d: float(d['price']) if 'price' in d else 0),
+
+        # Gold-API.com
+        ("gold-api.com",
+         "https://gold-api.com/api/price/XAU",
+         None,
+         lambda d: float(d['price']) if d and 'price' in d else 0),
+
+        # Frankfurter (ECB verileri)
+        ("frankfurter",
+         "https://api.frankfurter.app/latest",
+         {"from": "XAU", "to": "USD"},
+         lambda d: float(d['rates']['USD']) if d and 'rates' in d and 'USD' in d['rates'] else 0),
+    ]
+
+    for name, url, params, extractor in sources:
+        try:
+            if params:
+                resp = requests.get(url, params=params, timeout=8)
+            else:
+                resp = requests.get(url, timeout=8)
+
+            if resp.status_code != 200:
+                if _gold_source_errors.get(name, 0) < 3:
+                    print(f"⚠️ Gold kaynak {name}: HTTP {resp.status_code}")
+                    _gold_source_errors[name] = _gold_source_errors.get(name, 0) + 1
+                continue
+
+            data = resp.json()
+            p = extractor(data)
+
             if p > 1000:  # Mantıklı gold fiyatı mı?
-                _live_gold = {'price': p, 'source': 'gold-api.com', 'ts': time.time()}
+                _live_gold = {'price': p, 'source': name, 'ts': time.time()}
+                _gold_source_errors[name] = 0
                 return p
-    except:
-        pass
+            else:
+                if _gold_source_errors.get(name, 0) < 3:
+                    print(f"⚠️ Gold kaynak {name}: geçersiz fiyat ({p}), raw: {str(data)[:150]}")
+                    _gold_source_errors[name] = _gold_source_errors.get(name, 0) + 1
+        except Exception as e:
+            if _gold_source_errors.get(name, 0) < 3:
+                print(f"❌ Gold kaynak {name} hatası: {e}")
+                _gold_source_errors[name] = _gold_source_errors.get(name, 0) + 1
 
-    # Kaynak 2: Frankfurter.app (ECB verileri — forex bazlı)
-    try:
-        resp = requests.get("https://api.frankfurter.app/latest?from=XAU&to=USD", timeout=8)
-        data = resp.json()
-        if data and 'rates' in data and 'USD' in data['rates']:
-            p = float(data['rates']['USD'])
-            if p > 1000:
-                _live_gold = {'price': p, 'source': 'frankfurter', 'ts': time.time()}
-                return p
-    except:
-        pass
-
-    # Kaynak 3: TwelveData /price endpoint (1 kredi, gecikeli olabilir)
-    try:
-        resp = requests.get(f"{TD_BASE_URL}/price",
-            params={"symbol": "XAU/USD", "apikey": TD_API_KEY}, timeout=8)
-        data = resp.json()
-        if 'price' in data:
-            p = float(data['price'])
-            if p > 1000:
-                _live_gold = {'price': p, 'source': 'twelvedata', 'ts': time.time()}
-                return p
-    except:
-        pass
-
-    return _live_gold.get('price', 0)
+    # Hiçbir kaynak çalışmadı — mevcut cache'teki değeri döndür
+    if _live_gold.get('price', 0) > 0:
+        return _live_gold['price']
+    return 0
 
 
 # ─────────────────────────────────────────
@@ -4294,6 +4322,26 @@ def debug_api():
         results['api_usage'] = resp3.json()
     except Exception as e:
         results['api_usage'] = {"error": str(e)}
+
+    # Test 4: Canlı gold fiyat kaynakları
+    results['live_gold'] = {
+        'current_price': _live_gold.get('price', 0),
+        'source': _live_gold.get('source', 'yok'),
+        'age_seconds': round(time.time() - _live_gold.get('ts', 0), 1) if _live_gold.get('ts') else 'never',
+        'source_errors': dict(_gold_source_errors)
+    }
+    # Test 5: Binance kripto erişimi
+    try:
+        for burl in ["https://api.binance.us", "https://api.binance.com"]:
+            try:
+                br = requests.get(f"{burl}/api/v3/ticker/price", params={"symbol": "BTCUSDT"}, timeout=5)
+                results[f'binance_{burl.split("//")[1].split(".")[1]}'] = {
+                    'status': br.status_code, 'data': br.json() if br.status_code == 200 else br.text[:100]
+                }
+            except Exception as e:
+                results[f'binance_{burl.split("//")[1].split(".")[1]}'] = {'error': str(e)[:100]}
+    except:
+        pass
 
     results['timestamp'] = datetime.now(timezone.utc).isoformat()
     results['api_key_first8'] = TD_API_KEY[:8] + "..."
