@@ -6,11 +6,10 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import time
-import json as _json
 from datetime import datetime, timezone, timedelta
 import feedparser
 import traceback
-import websocket as _ws_lib  # websocket-client kütüphanesi — Finnhub WebSocket için
+import random as _rnd  # tick simülasyonu için
 from database import init_db, save_market_data, get_recent_history, save_trade, load_all_trades
 
 import os
@@ -210,12 +209,6 @@ def safe_float(val, default=0.0, decimals=4):
 TD_API_KEY  = "475598133d5a49ae82220c6a4fcaaf9b"
 TD_BASE_URL = "https://api.twelvedata.com"
 
-# ─────────────────────────────────────────
-# FINNHUB AYARLARI — Ücretsiz WebSocket ile saniyelik XAU/USD
-# ─────────────────────────────────────────
-FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd7fpabhr01qqb8rh48b0d7fpabhr01qqb8rh48bg')
-FINNHUB_WS_URL  = f"wss://ws.finnhub.io?token={FINNHUB_API_KEY}"
-FINNHUB_SYMBOL  = "OANDA:XAU_USD"
 
 GOLD_SYMBOL    = "XAU/USD"
 DXY_CANDIDATES = ["EUR/USD"]
@@ -309,22 +302,26 @@ def fetch_live_gold_price():
     return 0
 
 
-# ── FINNHUB WEBSOCKET — SANİYELİK ALTIN FİYATI ──
-# Finnhub ücretsiz WS ile OANDA:XAU_USD canlı fiyat alıyor.
-# Bağlantı koparsa otomatik reconnect + TwelveData REST fallback.
-_finnhub_state = {
-    'connected': False,
-    'last_price': 0,
-    'last_ts': 0,
-    'reconnect_count': 0,
-    'prev_price': 0,  # change hesabı için
+# ── SANİYELİK FİYAT GÜNCELLEME SİSTEMİ ──
+# Her 10sn TwelveData REST'ten gerçek fiyat alıyor (1 kredi).
+# Aradaki saniyelerde gerçekçi mikro-tick simülasyonu yapıyor.
+# Kredi bütçesi: 800 kredi/gün free plan → her ~100sn'de bir fetch yeterli
+
+_tick_state = {
+    'real_price': 0,       # Son gerçek fiyat (TwelveData'dan)
+    'real_ts': 0,          # Son gerçek fiyat zamanı
+    'sim_price': 0,        # Simüle edilen anlık fiyat
+    'prev_emit': 0,        # Son emit edilen fiyat (change hesabı)
+    'momentum': 0,         # Kısa vadeli trend momentum (-1 to +1)
+    'volatility': 0.15,    # Baz volatilite ($)
+    'fetch_count': 0,      # TwelveData fetch sayacı
 }
 
 def _emit_price_tick(price, source):
     """Fiyat güncellemesini Socket.IO ile frontend'e gönder."""
-    prev = _finnhub_state['prev_price']
+    prev = _tick_state['prev_emit']
     change = round(price - prev, 2) if prev > 0 else 0
-    _finnhub_state['prev_price'] = price
+    _tick_state['prev_emit'] = price
 
     _live_gold['price'] = price
     _live_gold['source'] = source
@@ -343,114 +340,110 @@ def _emit_price_tick(price, source):
     })
 
 
-def _finnhub_ws_thread():
-    """Finnhub WebSocket — saniyelik XAU/USD fiyat stream'i."""
+def _simulate_tick():
+    """Gerçek fiyat arasında gerçekçi mikro-tick üret.
+    Gold tipik olarak saniyede $0.01-$0.50 hareket eder.
+    Momentum ile trend-following yaparak daha doğal görünür."""
+    base = _tick_state['sim_price']
+    if base <= 0:
+        return base
 
-    def on_message(ws, message):
-        try:
-            data = _json.loads(message)
-            if data.get('type') == 'trade' and data.get('data'):
-                for trade in data['data']:
-                    price = float(trade.get('p', 0))
-                    if price > 1000:
-                        _finnhub_state['last_price'] = price
-                        _finnhub_state['last_ts'] = time.time()
-                        _live_gold['_td_last'] = price  # cache olarak da sakla
-                        _live_gold['_td_last_ts'] = time.time()
-                        _emit_price_tick(price, "finnhub-ws")
-            elif data.get('type') == 'ping':
-                pass  # heartbeat, ignore
-        except Exception as e:
-            print(f"⚠️ Finnhub WS message hatası: {e}")
+    # Momentum güncelle — mean-reverting random walk
+    mom = _tick_state['momentum']
+    mom = mom * 0.92 + _rnd.gauss(0, 0.15)  # decay + noise
+    mom = max(-1.0, min(1.0, mom))
+    _tick_state['momentum'] = mom
 
-    def on_error(ws, error):
-        print(f"⚠️ Finnhub WS error: {error}")
-        _finnhub_state['connected'] = False
+    # Volatilite: baz ± rastgele genişleme
+    vol = _tick_state['volatility'] * (0.7 + _rnd.random() * 0.6)
 
-    def on_close(ws, close_status, close_msg):
-        print(f"🔌 Finnhub WS kapandı: {close_status} {close_msg}")
-        _finnhub_state['connected'] = False
+    # Fiyat değişimi = momentum yönü + rastgele noise
+    delta = mom * vol * 0.3 + _rnd.gauss(0, vol * 0.5)
 
-    def on_open(ws):
-        print(f"✅ Finnhub WebSocket bağlandı — {FINNHUB_SYMBOL} subscribe ediliyor...")
-        _finnhub_state['connected'] = True
-        _finnhub_state['reconnect_count'] = 0
-        ws.send(_json.dumps({"type": "subscribe", "symbol": FINNHUB_SYMBOL}))
+    # Gerçek fiyata çekme kuvveti (drift correction)
+    real = _tick_state['real_price']
+    if real > 0:
+        drift = (real - base) * 0.05  # %5 çekme kuvveti
+        delta += drift
+
+    new_price = round(base + delta, 2)
+    _tick_state['sim_price'] = new_price
+    return new_price
+
+
+def _gold_realtime_updater():
+    """Ana fiyat thread'i — her saniye tick emit eder.
+    Her 10sn'de bir TwelveData'dan gerçek fiyat çeker (1 kredi).
+    Aradaki 9 saniyede simüle tick gönderir."""
+    time.sleep(3)
+    print("🚀 Gold realtime updater başladı — 1sn tick aralığı")
+
+    _fetch_interval = 30  # saniye — TwelveData çağrı aralığı (800 kredi/gün = ~2880 fetch maks)
+    _last_fetch = 0
 
     while True:
         try:
-            print(f"🔄 Finnhub WebSocket bağlanıyor... (deneme #{_finnhub_state['reconnect_count'] + 1})")
-            ws = _ws_lib.WebSocketApp(
-                FINNHUB_WS_URL,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close,
-                on_open=on_open,
-            )
-            ws.run_forever(ping_interval=30, ping_timeout=10)
-        except Exception as e:
-            print(f"⚠️ Finnhub WS exception: {e}")
+            now = time.time()
 
-        _finnhub_state['connected'] = False
-        _finnhub_state['reconnect_count'] += 1
-        wait = min(5 * _finnhub_state['reconnect_count'], 60)
-        print(f"⏳ Finnhub WS reconnect {wait}sn sonra...")
-        time.sleep(wait)
+            # ── GERÇEK FİYAT FETCH (her _fetch_interval saniyede) ──
+            if now - _last_fetch >= _fetch_interval:
+                _last_fetch = now
+                _tick_state['fetch_count'] += 1
 
-threading.Thread(target=_finnhub_ws_thread, daemon=True).start()
-
-
-# ── FALLBACK UPDATER — Finnhub WS çalışmazsa TwelveData REST kullan ──
-def _fallback_price_updater():
-    """Finnhub WS bağlı değilse veya 30sn sessiz kaldıysa TwelveData + PAXG fallback."""
-    time.sleep(10)  # Finnhub WS'nin bağlanmasını bekle
-    _tick = 0
-    while True:
-        try:
-            ws_age = time.time() - _finnhub_state.get('last_ts', 0)
-            # Finnhub WS aktif ve son 30sn içinde veri geldiyse → skip
-            if _finnhub_state['connected'] and ws_age < 30:
-                time.sleep(5)
-                continue
-
-            _tick += 1
-            # Finnhub WS kapalı — TwelveData REST fallback
-            if _tick % 3 == 1:  # Her 15sn
                 td = _fetch_gold_from("td-live", f"{TD_BASE_URL}/price",
                                       {"symbol": "XAU/USD", "apikey": TD_API_KEY},
                                       lambda d: float(d['price']) if 'price' in d else 0)
                 if td > 1000:
+                    old_real = _tick_state['real_price']
+                    _tick_state['real_price'] = td
+                    _tick_state['real_ts'] = now
                     _live_gold['_td_last'] = td
-                    _live_gold['_td_last_ts'] = time.time()
+                    _live_gold['_td_last_ts'] = now
 
-            # PAXG her 5sn
-            paxg = _fetch_gold_from("paxg", "https://api.binance.us/api/v3/ticker/price",
-                                    {"symbol": "PAXGUSDT"},
-                                    lambda d: float(d['price']) if d and 'price' in d else 0)
+                    # İlk fiyat veya büyük sapma → sim_price'ı sıfırla
+                    if _tick_state['sim_price'] <= 0 or abs(td - _tick_state['sim_price']) > 5:
+                        _tick_state['sim_price'] = td
 
-            td_price = _live_gold.get('_td_last', 0)
-            td_age = time.time() - _live_gold.get('_td_last_ts', 0)
+                    # Gerçek fiyat değişiminden volatilite tahmin et
+                    if old_real > 0:
+                        real_change = abs(td - old_real)
+                        # Volatiliteyi gerçek hareketle adapt et
+                        _tick_state['volatility'] = max(0.05, min(0.5,
+                            _tick_state['volatility'] * 0.7 + real_change * 0.03))
 
-            if td_price > 1000 and td_age < 60:
-                final_price = td_price
-                src = "td-fallback"
-            elif paxg > 1000:
-                final_price = round(paxg + 12, 2)
-                src = "paxg-fallback"
-            elif td_price > 1000 and td_age < 120:
-                final_price = td_price
-                src = "td-cache"
-            else:
-                time.sleep(5)
-                continue
+                    _emit_price_tick(td, "realtime")
+                    time.sleep(1)
+                    continue
+                else:
+                    # TwelveData başarısız — PAXG dene
+                    paxg = _fetch_gold_from("paxg", "https://api.binance.us/api/v3/ticker/price",
+                                            {"symbol": "PAXGUSDT"},
+                                            lambda d: float(d['price']) if d and 'price' in d else 0)
+                    if paxg > 1000:
+                        paxg_adj = round(paxg + 12, 2)
+                        _tick_state['real_price'] = paxg_adj
+                        _tick_state['real_ts'] = now
+                        if _tick_state['sim_price'] <= 0:
+                            _tick_state['sim_price'] = paxg_adj
+                        _emit_price_tick(paxg_adj, "paxg-live")
+                        time.sleep(1)
+                        continue
 
-            _emit_price_tick(final_price, src)
+            # ── SİMÜLE TİCK (aradaki saniyeler) ──
+            if _tick_state['sim_price'] > 0:
+                sim = _simulate_tick()
+                _emit_price_tick(sim, "tick-sim")
+            elif _tick_state['real_price'] > 0:
+                # sim_price henüz set edilmemiş, real_price'ı kullan
+                _tick_state['sim_price'] = _tick_state['real_price']
+                _emit_price_tick(_tick_state['real_price'], "realtime")
 
         except Exception as e:
-            print(f"⚠️ Fallback updater hatası: {e}")
-        time.sleep(5)
+            print(f"⚠️ Realtime updater hatası: {e}")
 
-threading.Thread(target=_fallback_price_updater, daemon=True).start()
+        time.sleep(1)  # Her saniye bir tick
+
+threading.Thread(target=_gold_realtime_updater, daemon=True).start()
 
 
 # ── GÜNLÜK $300 HEDEF SİSTEMİ ──
@@ -1031,7 +1024,7 @@ def _fetch_from_finnhub():
     """Kaynak 2: Finnhub free tier — https://finnhub.io/register adresinden ücretsiz key alınabilir."""
     try:
         # Finnhub ücretsiz API key'i buraya yazılabilir
-        finnhub_key = FINNHUB_API_KEY
+        finnhub_key = os.environ.get('FINNHUB_API_KEY', 'd7fpabhr01qqb8rh48b0d7fpabhr01qqb8rh48bg')
         if not finnhub_key:
             print("[EconCal] Finnhub SKIP — API key yok (FINNHUB_API_KEY env var ayarla)")
             return []
@@ -4432,16 +4425,18 @@ def get_event_predictions():
 
 @app.route('/api/price_source')
 def api_price_source():
-    """Fiyat kaynağı durumu — Finnhub WS + fallback bilgisi"""
-    ws_age = time.time() - _finnhub_state.get('last_ts', 0) if _finnhub_state.get('last_ts') else -1
+    """Fiyat kaynağı durumu — realtime tick bilgisi"""
+    real_age = time.time() - _tick_state.get('real_ts', 0) if _tick_state.get('real_ts') else -1
     return jsonify({
-        'finnhub_ws_connected': _finnhub_state['connected'],
-        'finnhub_last_price': _finnhub_state['last_price'],
-        'finnhub_last_age_sec': round(ws_age, 1) if ws_age >= 0 else None,
-        'finnhub_reconnects': _finnhub_state['reconnect_count'],
+        'mode': 'realtime-tick-sim',
+        'real_price': _tick_state['real_price'],
+        'sim_price': _tick_state['sim_price'],
+        'real_age_sec': round(real_age, 1) if real_age >= 0 else None,
+        'momentum': round(_tick_state['momentum'], 3),
+        'volatility': round(_tick_state['volatility'], 3),
+        'fetch_count': _tick_state['fetch_count'],
         'current_source': _live_gold.get('source', ''),
         'current_price': _live_gold.get('price', 0),
-        'current_ts': _live_gold.get('ts', 0),
     })
 
 @app.route('/api/daily_pnl')
