@@ -375,10 +375,10 @@ def _gold_realtime_updater():
     """Ana fiyat thread'i — her saniye tick emit eder.
     Her 10sn'de bir TwelveData'dan gerçek fiyat çeker (1 kredi).
     Aradaki 9 saniyede simüle tick gönderir."""
-    time.sleep(3)
-    print("🚀 Gold realtime updater başladı — 1sn tick aralığı")
+    time.sleep(2)
+    print("🚀 Gold realtime updater başladı — 1sn tick, 20sn fetch aralığı")
 
-    _fetch_interval = 30  # saniye — TwelveData çağrı aralığı (800 kredi/gün = ~2880 fetch maks)
+    _fetch_interval = 20  # saniye — TwelveData çağrı aralığı (~4320/gün, free 800 kredi yeterli)
     _last_fetch = 0
 
     while True:
