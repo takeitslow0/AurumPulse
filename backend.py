@@ -298,25 +298,24 @@ def fetch_live_gold_price():
 
 
 # ── HIZLI FİYAT GÜNCELLEME THREAD'İ ──
-# Binance PAXG limitsiz, 10 saniyede bir fiyat çeker
-# Scanner 55sn'de bir çalışıyor, bu aradaki boşluğu doldurur
+# Binance PAXG limitsiz, 2 saniyede bir fiyat çeker
 def _gold_price_updater():
-    """10 saniyede bir Binance PAXG'den gold fiyatını günceller + frontend'e push eder."""
-    time.sleep(10)  # Scanner'dan sonra başla
+    """2 saniyede bir Binance PAXG'den gold fiyatını günceller + frontend'e push eder."""
+    time.sleep(5)
     _err_count = 0
+    _prev_price = 0
     while True:
         try:
             p = _fetch_gold_from("paxg-fast", "https://api.binance.us/api/v3/ticker/price",
                                  {"symbol": "PAXGUSDT"},
                                  lambda d: float(d['price']) if d and 'price' in d else 0)
             if p > 0:
-                # TwelveData fiyatı varsa ortalama al, yoksa offset ekle
                 td_price = _live_gold.get('_td_last', 0)
                 if td_price > 0 and abs(td_price - p) < 100:
                     final_price = round((p + td_price) / 2, 2)
                     src = "avg(paxg+td)"
                 else:
-                    final_price = round(p + 12, 2)  # PAXG offset
+                    final_price = round(p + 12, 2)
                     src = "paxg+offset"
 
                 _live_gold['price'] = final_price
@@ -324,19 +323,144 @@ def _gold_price_updater():
                 _live_gold['ts'] = time.time()
                 _err_count = 0
 
-                # Frontend'e push
+                # Pozisyon P/L güncelle + price_tick gönder
+                _check_simulation_positions(final_price)
+
+                change = round(final_price - _prev_price, 2) if _prev_price > 0 else 0
+                _prev_price = final_price
+
                 socketio.emit('price_tick', {
                     'price': final_price,
+                    'change': change,
                     'source': src,
-                    'timestamp': int(time.time() * 1000)
+                    'timestamp': int(time.time() * 1000),
+                    'positions': _get_positions_snapshot(final_price),
+                    'daily_pnl': _get_daily_pnl(),
                 })
         except Exception as e:
             _err_count += 1
             if _err_count <= 3:
                 print(f"⚠️ Gold price updater hatası: {e}")
-        time.sleep(10)  # 10 saniye — Binance limitsiz
+        time.sleep(2)  # 2 saniye — Binance limitsiz
 
 threading.Thread(target=_gold_price_updater, daemon=True).start()
+
+
+# ── GÜNLÜK $300 HEDEF SİSTEMİ ──
+DAILY_TARGET = 300.0
+
+def _get_daily_pnl():
+    """Bugünkü toplam P/L hesapla"""
+    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    total = 0
+    closed_count = 0
+    for t in _trade_history:
+        ts = t.get('close_time', 0)
+        if ts > 0:
+            trade_date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d')
+            if trade_date == today_str:
+                total += t.get('pnl', 0)
+                closed_count += 1
+    # Açık pozisyonların unrealized P/L'si
+    unrealized = 0
+    price = _live_gold.get('price', 0)
+    if price > 0:
+        for pos in _active_positions:
+            lot_sz = pos.get('lot', 0.01)
+            if pos['trend'] == 'bullish':
+                unrealized += (price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
+            else:
+                unrealized += (pos['entry'] - price) * lot_sz * ACCOUNT_CONFIG['contract_size']
+    return {
+        'realized': round(total, 2),
+        'unrealized': round(unrealized, 2),
+        'total': round(total + unrealized, 2),
+        'target': DAILY_TARGET,
+        'progress_pct': round(min((total + unrealized) / DAILY_TARGET * 100, 100), 1) if DAILY_TARGET > 0 else 0,
+        'closed_trades': closed_count,
+        'target_reached': (total + unrealized) >= DAILY_TARGET,
+    }
+
+def _calculate_auto_lot(sl_distance):
+    """$300 günlük hedefe göre otomatik lot hesapla.
+    Kalan hedefe ulaşmak için gereken lot büyüklüğünü belirler."""
+    daily = _get_daily_pnl()
+    remaining = max(DAILY_TARGET - daily['realized'], 50)  # En az $50 hedef
+    contract = ACCOUNT_CONFIG['contract_size']  # 100 oz
+
+    if sl_distance <= 0:
+        sl_distance = 5.0
+
+    # Hedef: 1 trade'de kalan hedefin %30-50'sini kapatacak lot
+    target_per_trade = remaining * 0.35
+    # TP genelde SL'nin 2-3 katı, ortalama 2.5x diyelim
+    expected_tp = sl_distance * 2.5
+    # lot = hedef_kar / (tp_mesafesi * contract_size)
+    raw_lot = target_per_trade / (expected_tp * contract)
+
+    lot = round(max(min(raw_lot, 5.0), 0.01), 2)
+    return lot
+
+def _get_positions_snapshot(current_price):
+    """Açık pozisyonların anlık durumu"""
+    positions = []
+    for pos in _active_positions:
+        lot_sz = pos.get('lot', 0.01)
+        contract = ACCOUNT_CONFIG['contract_size']
+        if pos['trend'] == 'bullish':
+            pnl = (current_price - pos['entry']) * lot_sz * contract
+        else:
+            pnl = (pos['entry'] - current_price) * lot_sz * contract
+        positions.append({
+            'id': pos.get('open_time', 0),
+            'type': 'LONG' if pos['trend'] == 'bullish' else 'SHORT',
+            'entry': pos['entry'],
+            'sl': pos['sl'],
+            'tp1': pos['tp1'],
+            'tp2': pos.get('tp2', pos['tp1']),
+            'lot': lot_sz,
+            'pnl': round(pnl, 2),
+            'pattern': pos.get('pattern', ''),
+            'open_time': pos.get('open_time', 0),
+        })
+    return positions
+
+def _check_simulation_positions(current_price):
+    """Her fiyat tick'inde pozisyonları kontrol et (SL/TP)"""
+    global _active_positions
+    if not _active_positions or current_price <= 0:
+        return
+    for idx in range(len(_active_positions) - 1, -1, -1):
+        pos = _active_positions[idx]
+        lot_sz = pos.get('lot', 0.01)
+        contract = ACCOUNT_CONFIG['contract_size']
+
+        if pos['trend'] == 'bullish':
+            if current_price <= pos['sl']:
+                pnl = (current_price - pos['entry']) * lot_sz * contract
+                _record_trade(pos, current_price, "STOP-LOSS", pnl)
+                _active_positions.pop(idx)
+            elif current_price >= pos.get('tp2', pos['tp1']):
+                pnl = (current_price - pos['entry']) * lot_sz * contract
+                _record_trade(pos, current_price, "TP2", pnl)
+                _active_positions.pop(idx)
+            elif current_price >= pos['tp1'] and not pos.get('tp1_hit'):
+                _active_positions[idx]['tp1_hit'] = True
+                tp1_dist = pos['tp1'] - pos['entry']
+                _active_positions[idx]['sl'] = round(pos['entry'] + tp1_dist * 0.3, 2)
+        elif pos['trend'] == 'bearish':
+            if current_price >= pos['sl']:
+                pnl = (pos['entry'] - current_price) * lot_sz * contract
+                _record_trade(pos, current_price, "STOP-LOSS", pnl)
+                _active_positions.pop(idx)
+            elif current_price <= pos.get('tp2', pos['tp1']):
+                pnl = (pos['entry'] - current_price) * lot_sz * contract
+                _record_trade(pos, current_price, "TP2", pnl)
+                _active_positions.pop(idx)
+            elif current_price <= pos['tp1'] and not pos.get('tp1_hit'):
+                _active_positions[idx]['tp1_hit'] = True
+                tp1_dist = pos['entry'] - pos['tp1']
+                _active_positions[idx]['sl'] = round(pos['entry'] - tp1_dist * 0.3, 2)
 
 
 # ─────────────────────────────────────────
@@ -538,7 +662,7 @@ ACCOUNT_CONFIG = {
     'max_risk_pct': 5.0,     # v3.6 orijinal
     'contract_size': 100,    # 1 lot = 100 ons (XAU/USD standart)
     'min_lot': 0.01,         # Minimum lot büyüklüğü
-    'max_lot': 0.10,         # v5.7: 0.05 → 0.10
+    'max_lot': 5.0,          # Auto lot — $300 hedef için yüksek lot gerekebilir
     'leverage': 100,         # Kaldıraç oranı
 }
 
@@ -3463,7 +3587,9 @@ def build_response_payload(interval='1min'):
                         sl = pattern_signal.get('sl', 0)
                         tp1 = pattern_signal.get('tp1', 0)
                         tp2 = pattern_signal.get('tp2', 0)
-                        lot = pattern_signal.get('lot', ACCOUNT_CONFIG['min_lot'])
+                        # Auto lot: $300 günlük hedefe göre hesapla
+                        sl_dist = abs(current_price - sl) if sl > 0 else 5.0
+                        lot = _calculate_auto_lot(sl_dist)
                         pattern_name = pattern_signal.get('pattern', 'UNKNOWN')
                         confidence = pattern_signal.get('confidence', 0)
 
@@ -3660,14 +3786,16 @@ def build_response_payload(interval='1min'):
                             sl_dist = sl - current_price
                             tp1 = current_price - (1.5 * sl_dist)
                             tp2 = current_price - (2.5 * sl_dist)
-                        print(f"   ✅ POZİSYON AÇILIYOR — {_pattern_label} {trend} @ ${current_price:.2f}, SL=${sl:.2f}, TP1=${tp1:.2f}")
+                        _weak_sl_dist = abs(current_price - sl) if sl > 0 else 5.0
+                        _weak_lot = _calculate_auto_lot(_weak_sl_dist)
+                        print(f"   ✅ POZİSYON AÇILIYOR — {_pattern_label} {trend} @ ${current_price:.2f}, SL=${sl:.2f}, TP1=${tp1:.2f}, Lot={_weak_lot}")
                         _active_positions.append({
                             'trend': trend, 'signal': sig_type,
                             'entry': current_price, 'sl': round(sl, 2),
                             'tp1': round(tp1, 2), 'tp2': round(tp2, 2), 'tp1_hit': False,
                             'open_time': int(time.time()),
-                            'lot': ACCOUNT_CONFIG['min_lot'],
-                            'remaining_lot': ACCOUNT_CONFIG['min_lot'],
+                            'lot': _weak_lot,
+                            'remaining_lot': _weak_lot,
                             'partial_done': False,
                             'trailing_sl': sl,
                             'pattern': _pattern_label,
@@ -4194,6 +4322,30 @@ def get_event_predictions():
     except Exception as e:
         return jsonify({"predictions": [], "error": str(e)})
 
+
+@app.route('/api/daily_pnl')
+def api_daily_pnl():
+    """Günlük P/L ve $300 hedef durumu"""
+    return jsonify(_get_daily_pnl())
+
+@app.route('/api/positions')
+def api_positions():
+    """Açık pozisyonlar anlık snapshot"""
+    price = _live_gold.get('price', 0)
+    return jsonify({'positions': _get_positions_snapshot(price), 'price': price})
+
+@app.route('/api/closed_today')
+def api_closed_today():
+    """Bugün kapatılan işlemler"""
+    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    trades = []
+    for t in _trade_history:
+        ts = t.get('close_time', 0)
+        if ts > 0:
+            trade_date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d')
+            if trade_date == today_str:
+                trades.append(t)
+    return jsonify({'trades': trades, 'count': len(trades)})
 
 @app.route('/api/geopolitics')
 def api_geopolitics():
