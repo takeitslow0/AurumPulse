@@ -256,7 +256,7 @@ def fetch_live_gold_price():
     prices = {}
 
     # 1) Binance PAXG (gerçek zamanlı, limitsiz, ama ~$10-15 düşük)
-    p = _fetch_gold_from("binance-paxg", "https://api.binance.us/api/v3/ticker/price",
+    p = _fetch_gold_from("binance-paxg", "https://api.binance.com/api/v3/ticker/price",
                          {"symbol": "PAXGUSDT"},
                          lambda d: float(d['price']) if d and 'price' in d else 0)
     if p > 0:
@@ -378,7 +378,7 @@ def _gold_realtime_updater():
     time.sleep(2)
     print("🚀 Gold realtime updater başladı — 1sn tick, 20sn fetch aralığı")
 
-    _fetch_interval = 20  # saniye — TwelveData çağrı aralığı (~4320/gün, free 800 kredi yeterli)
+    _fetch_interval = 120  # saniye — TwelveData /price çağrı aralığı (~720/gün, free 800 kredi sınırı)
     _last_fetch = 0
 
     while True:
@@ -416,7 +416,7 @@ def _gold_realtime_updater():
                     continue
                 else:
                     # TwelveData başarısız — PAXG dene
-                    paxg = _fetch_gold_from("paxg", "https://api.binance.us/api/v3/ticker/price",
+                    paxg = _fetch_gold_from("paxg", "https://api.binance.com/api/v3/ticker/price",
                                             {"symbol": "PAXGUSDT"},
                                             lambda d: float(d['price']) if d and 'price' in d else 0)
                     if paxg > 1000:
@@ -4022,13 +4022,11 @@ def background_scanner():
         t0 = time.time()
         _scan_count += 1
         try:
-            # Önce canlı gold fiyatını güncelle (TwelveData'dan bağımsız)
-            live_p = fetch_live_gold_price()
-            if live_p > 0:
+            # Fiyat tick updater tarafından güncelleniyor — burada tekrar çekme
+            live_p = _live_gold.get('price', 0)
+            if live_p > 0 and (_scan_count <= 3 or _scan_count % 10 == 0):
                 src = _live_gold.get('source', '?')
-                if _scan_count <= 3 or _scan_count % 10 == 0:
-                    print(f"   💰 Canlı gold: ${live_p:.2f} (kaynak: {src})")
-            # Cache'i temizleme — TTL'e güven, gereksiz API çağrısı yapma
+                print(f"   💰 Canlı gold: ${live_p:.2f} (kaynak: {src})")
             payload = build_response_payload('1min')
             if payload:
                 socketio.emit('market_update', payload)
@@ -4047,7 +4045,7 @@ def background_scanner():
         except Exception as e:
             print(f"Scanner Hatası #{_scan_count}: {e}")
             traceback.print_exc()
-        time.sleep(120)  # 120sn döngü — updater fiyat çekiyor, scanner sinyal/pattern için
+        time.sleep(180)  # 180sn döngü — kredi tasarrufu, updater fiyat çekiyor
 
 threading.Thread(target=background_scanner, daemon=True).start()
 
@@ -4635,7 +4633,7 @@ def debug_api():
     }
     # Test 5: Binance kripto erişimi
     try:
-        for burl in ["https://api.binance.us", "https://api.binance.com"]:
+        for burl in ["https://api.binance.com", "https://api.binance.com"]:
             try:
                 br = requests.get(f"{burl}/api/v3/ticker/price", params={"symbol": "BTCUSDT"}, timeout=5)
                 results[f'binance_{burl.split("//")[1].split(".")[1]}'] = {
@@ -4754,7 +4752,7 @@ CRYPTO_SYMBOLS = {
 BINANCE_ENDPOINTS = [
     "https://api.binance.com",
     "https://api1.binance.com",
-    "https://api.binance.us",
+    "https://api.binance.com",
 ]
 _working_binance = {'url': '', 'ts': 0}  # Son çalışan endpoint
 
