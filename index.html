@@ -694,45 +694,6 @@
         _socket.on('market_update', (data) => {
           if (data && !data.error) updateDashboard(data);
         });
-        // Saniye bazli canli fiyat — TwelveData WebSocket'ten geliyor
-        _socket.on('price_tick', (data) => {
-          if (!data || !data.price) return;
-          const price = data.price;
-          $set('mainPrice', '$' + price.toFixed(2));
-          if (lastPrice > 0) {
-            const diff = price - lastPrice;
-            const pct = ((diff / lastPrice) * 100);
-            const el = document.getElementById('priceChange');
-            if (el) {
-              el.textContent = (diff >= 0 ? '+' : '') + diff.toFixed(2) + ' (' + pct.toFixed(2) + '%)';
-              el.style.color = diff >= 0 ? 'var(--green)' : 'var(--red)';
-            }
-          }
-          lastPrice = price;
-          $set('lastUpdate', new Date().toLocaleTimeString('tr-TR'));
-          // Aktif pozisyon PnL guncelle
-          if (data.active_positions && data.active_positions.length > 0) {
-            const apBar = document.getElementById('activePositionBar');
-            if (apBar) apBar.className = 'pos-bar visible';
-            $set('posCount', data.active_positions.length + '/3');
-            const listEl = document.getElementById('activePositionsList');
-            if (listEl) {
-              listEl.innerHTML = data.active_positions.map((pos, i) => {
-                const isBull = pos.trend === 'bullish';
-                const livePnl = isBull ? price - pos.entry : pos.entry - price;
-                const pnlDollar = livePnl * (pos.lot || 0.01) * 100;
-                return '<div class="pos-item">' +
-                  '<span class="dir-badge ' + (isBull?'long':'short') + '">' + (isBull?'LONG':'SHORT') + '</span>' +
-                  '<span>Entry: <b>$' + pos.entry.toFixed(2) + '</b></span>' +
-                  '<span>SL: <b style="color:var(--red)">$' + pos.sl.toFixed(2) + '</b></span>' +
-                  '<span>TP1: <b style="color:var(--green)">$' + pos.tp1.toFixed(2) + '</b></span>' +
-                  '<span style="color:var(--gold)">' + (pos.pattern||'COMPOSITE') + '</span>' +
-                  '<span class="pos-pnl" style="color:' + (pnlDollar>=0?'var(--green)':'var(--red)') + '">' +
-                  (pnlDollar>=0?'+':'') + '$' + pnlDollar.toFixed(2) + '</span></div>';
-              }).join('');
-            }
-          }
-        });
       }
     } catch (e) { console.log('Socket.IO init error:', e); }
 
@@ -1185,9 +1146,9 @@
           console.log('[AurumPulse] Veri geldi — ' + data.candles?.length + ' mum');
           _initRetry = 0;
           updateDashboard(data);
-          // Socket.IO market_update + price_tick ile guncelleniyor
-          // loadData fallback olarak 90sn'de bir calisir
-          setInterval(loadData, 90000);
+          // WebSocket varsa polling yavas, yoksa hizli
+          const pollInterval = _socket && _socket.connected ? 60000 : 30000;
+          setInterval(loadData, pollInterval);
           setInterval(loadEventPredictions, 120000);
           setInterval(loadTradeHistory, 60000);
           setInterval(loadHistory, 300000);

@@ -6,11 +6,9 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import time
-import json as _json
 from datetime import datetime, timezone, timedelta
 import feedparser
 import traceback
-import websocket as _ws_client
 from database import init_db, save_market_data, get_recent_history, save_trade, load_all_trades
 
 import os
@@ -253,7 +251,7 @@ _dxy_cache  = {'df': pd.DataFrame(), 'sym': '', 'ts': 0}
 _htf_cache  = {'df': pd.DataFrame(), 'ts': 0}  # 15dk HTF cache
 _cache_lock = threading.Lock()
 
-GOLD_TTL = {'1min': 90, '5min': 600, '15min': 900, '1h': 3600}  # 1min=90sn → ~480 çağrı/gün
+GOLD_TTL = {'1min': 120, '5min': 600, '15min': 900, '1h': 3600}
 DXY_TTL  = 3600  # DXY 1 saat cache — API tasarrufu
 HTF_TTL  = 3600  # 15dk cache 1 saat — API tasarrufu
 
@@ -3142,9 +3140,6 @@ def build_response_payload(interval='1min'):
 
         dxy_price = safe_float(dxy_df['close'].iloc[-1], 0.0, 4) if not dxy_df.empty else 0.0
         current_price = safe_float(last.get('close'), 0.0, 2)
-        # WS'den daha güncel fiyat varsa kullan (pozisyon yönetimi için daha doğru)
-        if _live_price['price'] > 0 and (time.time() * 1000 - _live_price['ts']) < 30000:
-            current_price = round(_live_price['price'], 2)
         current_vol = safe_float(last.get('volume'), 0.0, 2)
         if current_vol == 0:
             current_vol = safe_float(
@@ -3690,9 +3685,6 @@ def background_scanner():
                 dxy = payload.get('dxy_price', 0)
                 if price > 0:
                     save_market_data(price, rsi, dxy)
-                    # Price emitter için güncelle (WS yoksa tek kaynak)
-                    _live_price['price'] = price
-                    _live_price['ts'] = int(time.time() * 1000)
                 ts = payload.get('trading_signals', {})
                 ap = len(_active_positions)
                 print(f"   📊 [{_scan_count}] Sinyal: {ts.get('trend','?')} | Conf: {ts.get('pattern','?')} | Aktif Poz: {ap}/3 | RSI: {rsi:.1f}")
@@ -3703,119 +3695,9 @@ def background_scanner():
         except Exception as e:
             print(f"Scanner Hatası #{_scan_count}: {e}")
             traceback.print_exc()
-        time.sleep(30)  # 30sn döngü — cache TTL sayesinde API maliyeti aynı kalır
+        time.sleep(55)  # 55sn döngü — gold cache 120sn, her 2 döngüde 1 yeni veri
 
 threading.Thread(target=background_scanner, daemon=True).start()
-
-# ─────────────────────────────────────────
-# CANLI FİYAT SİSTEMİ
-# 1) TwelveData WebSocket dener (Pro+ plan gerekli)
-# 2) Başarısız olursa → hafif REST price poller (15sn, 1 kredi/çağrı)
-# ─────────────────────────────────────────
-_live_price = {'price': 0, 'ts': 0}
-_ws_connected = False  # WS bağlı mı?
-
-def _td_ws_stream():
-    """TwelveData WebSocket — Pro+ plan gerekli, 3 deneme sonra pes eder"""
-    global _ws_connected
-    _retry = 0
-    MAX_WS_RETRIES = 3  # Free plan desteklemez, 3 denemede pes et
-
-    while _retry < MAX_WS_RETRIES:
-        try:
-            ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={TD_API_KEY}"
-            print(f"🔌 TwelveData WS bağlanıyor... (deneme #{_retry+1}/{MAX_WS_RETRIES})")
-
-            def on_open(ws):
-                nonlocal _retry
-                global _ws_connected
-                _retry = 0
-                _ws_connected = True
-                sub = {"action": "subscribe", "params": {"symbols": "XAU/USD"}}
-                ws.send(_json.dumps(sub))
-                print("✅ TwelveData WS bağlandı — XAU/USD akışı başladı")
-
-            def on_message(ws, message):
-                try:
-                    data = _json.loads(message)
-                    if 'price' in data:
-                        price = float(data['price'])
-                        _live_price['price'] = price
-                        _live_price['ts'] = int(time.time() * 1000)
-                        socketio.emit('price_tick', {
-                            'price': price,
-                            'timestamp': _live_price['ts'],
-                            'active_positions': [
-                                {
-                                    'trend': p['trend'], 'entry': p['entry'],
-                                    'sl': p['sl'], 'tp1': p['tp1'], 'tp2': p['tp2'],
-                                    'lot': p.get('lot', 0.01), 'pattern': p.get('pattern', '')
-                                } for p in _active_positions
-                            ]
-                        })
-                    elif data.get('event') == 'subscribe-status':
-                        print(f"   📡 WS subscribe: {data.get('status', '?')}")
-                    elif data.get('status') == 'error':
-                        print(f"   ❌ WS hata: {data.get('message', '?')}")
-                except Exception as e:
-                    pass
-
-            def on_error(ws, error):
-                global _ws_connected
-                _ws_connected = False
-                print(f"⚠️ TwelveData WS hata: {error}")
-
-            def on_close(ws, close_status, close_msg):
-                global _ws_connected
-                _ws_connected = False
-                print(f"🔌 TwelveData WS kapandı: {close_status} {close_msg}")
-
-            ws = _ws_client.WebSocketApp(
-                ws_url,
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close
-            )
-            ws.run_forever(ping_interval=30, ping_timeout=10)
-        except Exception as e:
-            print(f"❌ TwelveData WS bağlantı hatası: {e}")
-
-        _ws_connected = False
-        _retry += 1
-        if _retry < MAX_WS_RETRIES:
-            wait = min(10 * (2 ** _retry), 60)
-            print(f"🔄 TwelveData WS yeniden bağlanacak: {wait}sn sonra (deneme {_retry}/{MAX_WS_RETRIES})")
-            time.sleep(wait)
-
-    print("⚠️ TwelveData WS 3 denemede bağlanamadı (Free plan desteklemez) → REST price poller aktif")
-    # WS başarısız → REST price poller'ı başlat
-    _start_price_poller()
-
-
-def _start_price_poller():
-    """Cache-based price emitter — EK API çağrısı YAPMAZ.
-    Scanner'ın cache'e koyduğu son fiyatı 10 saniyede bir frontend'e push eder.
-    API limiti hiç etkilenmez — sadece mevcut cache'i yeniden emit eder."""
-    print("🔄 Price Emitter başlatılıyor (10sn aralık, sıfır API maliyeti)")
-
-    while True:
-        if _live_price['price'] > 0:
-            socketio.emit('price_tick', {
-                'price': _live_price['price'],
-                'timestamp': _live_price['ts'],
-                'active_positions': [
-                    {
-                        'trend': p['trend'], 'entry': p['entry'],
-                        'sl': p['sl'], 'tp1': p['tp1'], 'tp2': p['tp2'],
-                        'lot': p.get('lot', 0.01), 'pattern': p.get('pattern', '')
-                    } for p in _active_positions
-                ]
-            })
-
-        time.sleep(10)
-
-threading.Thread(target=_td_ws_stream, daemon=True).start()
 
 # ─────────────────────────────────────────
 # OLAY ÖNCESİ TELEGRAM UYARI SİSTEMİ
