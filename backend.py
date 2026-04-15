@@ -230,78 +230,113 @@ def get_validated_interval(p):
 # ─────────────────────────────────────────
 _live_gold = {'price': 0, 'source': '', 'ts': 0}
 
-_gold_source_errors = {}  # Kaynak bazlı hata sayacı
+_gold_source_errors = {}
+
+def _fetch_gold_from(name, url, params, extractor):
+    """Tek bir kaynaktan gold fiyatı çeker, hata varsa 0 döner."""
+    try:
+        resp = requests.get(url, params=params, timeout=6) if params else requests.get(url, timeout=6)
+        if resp.status_code != 200:
+            return 0
+        data = resp.json()
+        p = extractor(data)
+        return p if p > 1000 else 0
+    except:
+        return 0
+
 
 def fetch_live_gold_price():
-    """Birden fazla ücretsiz kaynaktan anlık gold fiyatı çeker."""
+    """Birden fazla kaynaktan gold fiyatı çeker, en iyi değeri seçer.
+    PAXG genelde ~$10-15 düşük, TwelveData ~$15-25 yüksek olabiliyor.
+    Birden fazla kaynak varsa ortalama alınır."""
     global _live_gold
 
-    sources = [
-        # (isim, url, params, price_extractor)
+    prices = {}
 
-        # Binance PAXGUSDT (altın-backed token, gerçek zamanlı, ücretsiz)
-        ("binance-paxg",
-         "https://api.binance.us/api/v3/ticker/price",
-         {"symbol": "PAXGUSDT"},
-         lambda d: float(d['price']) if d and 'price' in d else 0),
+    # 1) Binance PAXG (gerçek zamanlı, limitsiz, ama ~$10-15 düşük)
+    p = _fetch_gold_from("binance-paxg", "https://api.binance.us/api/v3/ticker/price",
+                         {"symbol": "PAXGUSDT"},
+                         lambda d: float(d['price']) if d and 'price' in d else 0)
+    if p > 0:
+        prices['paxg'] = p
 
-        ("binance-paxg-global",
-         "https://api.binance.com/api/v3/ticker/price",
-         {"symbol": "PAXGUSDT"},
-         lambda d: float(d['price']) if d and 'price' in d else 0),
+    # 2) TwelveData /price (1 kredi, bazen 15dk gecikmeli)
+    p = _fetch_gold_from("twelvedata", f"{TD_BASE_URL}/price",
+                         {"symbol": "XAU/USD", "apikey": TD_API_KEY},
+                         lambda d: float(d['price']) if 'price' in d else 0)
+    if p > 0:
+        prices['twelvedata'] = p
+        _live_gold['_td_last'] = p  # updater thread için cache'le
 
-        # TwelveData (API key var, güvenilir ama gecikeli olabilir)
-        ("twelvedata",
-         f"{TD_BASE_URL}/price",
-         {"symbol": "XAU/USD", "apikey": TD_API_KEY},
-         lambda d: float(d['price']) if 'price' in d else 0),
+    # 3) Gold-API.com
+    p = _fetch_gold_from("gold-api", "https://gold-api.com/api/price/XAU",
+                         None,
+                         lambda d: float(d['price']) if d and 'price' in d else 0)
+    if p > 0:
+        prices['gold-api'] = p
 
-        # Gold-API.com
-        ("gold-api.com",
-         "https://gold-api.com/api/price/XAU",
-         None,
-         lambda d: float(d['price']) if d and 'price' in d else 0),
+    # ── EN İYİ FİYATI SEÇ ──
+    if len(prices) >= 2:
+        # Birden fazla kaynak var → ortalama al (sapmaları dengeler)
+        avg = round(sum(prices.values()) / len(prices), 2)
+        src = '+'.join(prices.keys())
+        _live_gold = {'price': avg, 'source': f"avg({src})", 'ts': time.time()}
+        return avg
+    elif len(prices) == 1:
+        name, val = list(prices.items())[0]
+        # PAXG tek kaynaksa +$12 offset ekle (bilinen fark)
+        if name == 'paxg':
+            val = round(val + 12, 2)
+            name = 'paxg+offset'
+        _live_gold = {'price': val, 'source': name, 'ts': time.time()}
+        return val
 
-        # Frankfurter (ECB verileri)
-        ("frankfurter",
-         "https://api.frankfurter.app/latest",
-         {"from": "XAU", "to": "USD"},
-         lambda d: float(d['rates']['USD']) if d and 'rates' in d and 'USD' in d['rates'] else 0),
-    ]
-
-    for name, url, params, extractor in sources:
-        try:
-            if params:
-                resp = requests.get(url, params=params, timeout=8)
-            else:
-                resp = requests.get(url, timeout=8)
-
-            if resp.status_code != 200:
-                if _gold_source_errors.get(name, 0) < 3:
-                    print(f"⚠️ Gold kaynak {name}: HTTP {resp.status_code}")
-                    _gold_source_errors[name] = _gold_source_errors.get(name, 0) + 1
-                continue
-
-            data = resp.json()
-            p = extractor(data)
-
-            if p > 1000:  # Mantıklı gold fiyatı mı?
-                _live_gold = {'price': p, 'source': name, 'ts': time.time()}
-                _gold_source_errors[name] = 0
-                return p
-            else:
-                if _gold_source_errors.get(name, 0) < 3:
-                    print(f"⚠️ Gold kaynak {name}: geçersiz fiyat ({p}), raw: {str(data)[:150]}")
-                    _gold_source_errors[name] = _gold_source_errors.get(name, 0) + 1
-        except Exception as e:
-            if _gold_source_errors.get(name, 0) < 3:
-                print(f"❌ Gold kaynak {name} hatası: {e}")
-                _gold_source_errors[name] = _gold_source_errors.get(name, 0) + 1
-
-    # Hiçbir kaynak çalışmadı — mevcut cache'teki değeri döndür
+    # Hiçbir kaynak çalışmadı
     if _live_gold.get('price', 0) > 0:
         return _live_gold['price']
     return 0
+
+
+# ── HIZLI FİYAT GÜNCELLEME THREAD'İ ──
+# Binance PAXG limitsiz, 10 saniyede bir fiyat çeker
+# Scanner 55sn'de bir çalışıyor, bu aradaki boşluğu doldurur
+def _gold_price_updater():
+    """10 saniyede bir Binance PAXG'den gold fiyatını günceller + frontend'e push eder."""
+    time.sleep(10)  # Scanner'dan sonra başla
+    _err_count = 0
+    while True:
+        try:
+            p = _fetch_gold_from("paxg-fast", "https://api.binance.us/api/v3/ticker/price",
+                                 {"symbol": "PAXGUSDT"},
+                                 lambda d: float(d['price']) if d and 'price' in d else 0)
+            if p > 0:
+                # TwelveData fiyatı varsa ortalama al, yoksa offset ekle
+                td_price = _live_gold.get('_td_last', 0)
+                if td_price > 0 and abs(td_price - p) < 100:
+                    final_price = round((p + td_price) / 2, 2)
+                    src = "avg(paxg+td)"
+                else:
+                    final_price = round(p + 12, 2)  # PAXG offset
+                    src = "paxg+offset"
+
+                _live_gold['price'] = final_price
+                _live_gold['source'] = src
+                _live_gold['ts'] = time.time()
+                _err_count = 0
+
+                # Frontend'e push
+                socketio.emit('price_tick', {
+                    'price': final_price,
+                    'source': src,
+                    'timestamp': int(time.time() * 1000)
+                })
+        except Exception as e:
+            _err_count += 1
+            if _err_count <= 3:
+                print(f"⚠️ Gold price updater hatası: {e}")
+        time.sleep(10)  # 10 saniye — Binance limitsiz
+
+threading.Thread(target=_gold_price_updater, daemon=True).start()
 
 
 # ─────────────────────────────────────────
