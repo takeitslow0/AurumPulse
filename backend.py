@@ -6,9 +6,11 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import time
+import json as _json
 from datetime import datetime, timezone, timedelta
 import feedparser
 import traceback
+import websocket as _ws_lib  # websocket-client kütüphanesi — Finnhub WebSocket için
 from database import init_db, save_market_data, get_recent_history, save_trade, load_all_trades
 
 import os
@@ -208,6 +210,13 @@ def safe_float(val, default=0.0, decimals=4):
 TD_API_KEY  = "475598133d5a49ae82220c6a4fcaaf9b"
 TD_BASE_URL = "https://api.twelvedata.com"
 
+# ─────────────────────────────────────────
+# FINNHUB AYARLARI — Ücretsiz WebSocket ile saniyelik XAU/USD
+# ─────────────────────────────────────────
+FINNHUB_API_KEY = os.environ.get('FINNHUB_API_KEY', 'd7fpabhr01qqb8rh48b0d7fpabhr01qqb8rh48bg')
+FINNHUB_WS_URL  = f"wss://ws.finnhub.io?token={FINNHUB_API_KEY}"
+FINNHUB_SYMBOL  = "OANDA:XAU_USD"
+
 GOLD_SYMBOL    = "XAU/USD"
 DXY_CANDIDATES = ["EUR/USD"]
 
@@ -300,24 +309,113 @@ def fetch_live_gold_price():
     return 0
 
 
-# ── HIZLI FİYAT GÜNCELLEME THREAD'İ ──
-# Her 15sn TwelveData /price (1 kredi) + PAXG aralarında
-# Kredi bütçesi: ~5760 çağrı/gün updater, scanner 120sn = ~720 çağrı
-# Toplam: ~700-800 kredi/gün (free plan 800)
-def _gold_price_updater():
-    """5 saniyede bir fiyat günceller. Her 3. tick'te TwelveData çağırır (15sn)."""
-    time.sleep(5)
-    _err_count = 0
-    _prev_price = 0
-    _tick_count = 0
+# ── FINNHUB WEBSOCKET — SANİYELİK ALTIN FİYATI ──
+# Finnhub ücretsiz WS ile OANDA:XAU_USD canlı fiyat alıyor.
+# Bağlantı koparsa otomatik reconnect + TwelveData REST fallback.
+_finnhub_state = {
+    'connected': False,
+    'last_price': 0,
+    'last_ts': 0,
+    'reconnect_count': 0,
+    'prev_price': 0,  # change hesabı için
+}
+
+def _emit_price_tick(price, source):
+    """Fiyat güncellemesini Socket.IO ile frontend'e gönder."""
+    prev = _finnhub_state['prev_price']
+    change = round(price - prev, 2) if prev > 0 else 0
+    _finnhub_state['prev_price'] = price
+
+    _live_gold['price'] = price
+    _live_gold['source'] = source
+    _live_gold['ts'] = time.time()
+
+    # Pozisyon SL/TP kontrolü
+    _check_simulation_positions(price)
+
+    socketio.emit('price_tick', {
+        'price': price,
+        'change': change,
+        'source': source,
+        'timestamp': int(time.time() * 1000),
+        'positions': _get_positions_snapshot(price),
+        'daily_pnl': _get_daily_pnl(),
+    })
+
+
+def _finnhub_ws_thread():
+    """Finnhub WebSocket — saniyelik XAU/USD fiyat stream'i."""
+
+    def on_message(ws, message):
+        try:
+            data = _json.loads(message)
+            if data.get('type') == 'trade' and data.get('data'):
+                for trade in data['data']:
+                    price = float(trade.get('p', 0))
+                    if price > 1000:
+                        _finnhub_state['last_price'] = price
+                        _finnhub_state['last_ts'] = time.time()
+                        _live_gold['_td_last'] = price  # cache olarak da sakla
+                        _live_gold['_td_last_ts'] = time.time()
+                        _emit_price_tick(price, "finnhub-ws")
+            elif data.get('type') == 'ping':
+                pass  # heartbeat, ignore
+        except Exception as e:
+            print(f"⚠️ Finnhub WS message hatası: {e}")
+
+    def on_error(ws, error):
+        print(f"⚠️ Finnhub WS error: {error}")
+        _finnhub_state['connected'] = False
+
+    def on_close(ws, close_status, close_msg):
+        print(f"🔌 Finnhub WS kapandı: {close_status} {close_msg}")
+        _finnhub_state['connected'] = False
+
+    def on_open(ws):
+        print(f"✅ Finnhub WebSocket bağlandı — {FINNHUB_SYMBOL} subscribe ediliyor...")
+        _finnhub_state['connected'] = True
+        _finnhub_state['reconnect_count'] = 0
+        ws.send(_json.dumps({"type": "subscribe", "symbol": FINNHUB_SYMBOL}))
+
     while True:
         try:
-            _tick_count += 1
-            final_price = 0
-            src = ""
+            print(f"🔄 Finnhub WebSocket bağlanıyor... (deneme #{_finnhub_state['reconnect_count'] + 1})")
+            ws = _ws_lib.WebSocketApp(
+                FINNHUB_WS_URL,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+                on_open=on_open,
+            )
+            ws.run_forever(ping_interval=30, ping_timeout=10)
+        except Exception as e:
+            print(f"⚠️ Finnhub WS exception: {e}")
 
-            # Her 3. tick'te (15sn) TwelveData /price çağır — 1 kredi
-            if _tick_count % 3 == 1:
+        _finnhub_state['connected'] = False
+        _finnhub_state['reconnect_count'] += 1
+        wait = min(5 * _finnhub_state['reconnect_count'], 60)
+        print(f"⏳ Finnhub WS reconnect {wait}sn sonra...")
+        time.sleep(wait)
+
+threading.Thread(target=_finnhub_ws_thread, daemon=True).start()
+
+
+# ── FALLBACK UPDATER — Finnhub WS çalışmazsa TwelveData REST kullan ──
+def _fallback_price_updater():
+    """Finnhub WS bağlı değilse veya 30sn sessiz kaldıysa TwelveData + PAXG fallback."""
+    time.sleep(10)  # Finnhub WS'nin bağlanmasını bekle
+    _tick = 0
+    while True:
+        try:
+            ws_age = time.time() - _finnhub_state.get('last_ts', 0)
+            # Finnhub WS aktif ve son 30sn içinde veri geldiyse → skip
+            if _finnhub_state['connected'] and ws_age < 30:
+                time.sleep(5)
+                continue
+
+            _tick += 1
+            # Finnhub WS kapalı — TwelveData REST fallback
+            if _tick % 3 == 1:  # Her 15sn
                 td = _fetch_gold_from("td-live", f"{TD_BASE_URL}/price",
                                       {"symbol": "XAU/USD", "apikey": TD_API_KEY},
                                       lambda d: float(d['price']) if 'price' in d else 0)
@@ -325,66 +423,34 @@ def _gold_price_updater():
                     _live_gold['_td_last'] = td
                     _live_gold['_td_last_ts'] = time.time()
 
-            # Her tick: PAXG kontrol (ücretsiz)
+            # PAXG her 5sn
             paxg = _fetch_gold_from("paxg", "https://api.binance.us/api/v3/ticker/price",
                                     {"symbol": "PAXGUSDT"},
                                     lambda d: float(d['price']) if d and 'price' in d else 0)
 
-            # Kaynakları topla
             td_price = _live_gold.get('_td_last', 0)
             td_age = time.time() - _live_gold.get('_td_last_ts', 0)
 
-            prices = {}
             if td_price > 1000 and td_age < 60:
-                prices['td'] = td_price
-            if paxg > 1000:
-                prices['paxg'] = round(paxg + 12, 2)
-
-            if not prices:
-                # Eski TD cache'i kullan (120sn'ye kadar)
-                if td_price > 1000 and td_age < 120:
-                    final_price = td_price
-                    src = "td-cache"
-                else:
-                    time.sleep(5)
-                    continue
-            elif 'td' in prices and 'paxg' in prices:
-                # İkisi de var → TD'ye %80 ağırlık
-                final_price = round(td_price * 0.8 + prices['paxg'] * 0.2, 2)
-                src = "td+paxg"
-            elif 'td' in prices:
                 final_price = td_price
-                src = "twelvedata"
+                src = "td-fallback"
+            elif paxg > 1000:
+                final_price = round(paxg + 12, 2)
+                src = "paxg-fallback"
+            elif td_price > 1000 and td_age < 120:
+                final_price = td_price
+                src = "td-cache"
             else:
-                final_price = prices['paxg']
-                src = "paxg"
+                time.sleep(5)
+                continue
 
-            _live_gold['price'] = final_price
-            _live_gold['source'] = src
-            _live_gold['ts'] = time.time()
-            _err_count = 0
+            _emit_price_tick(final_price, src)
 
-            # Pozisyon SL/TP kontrolü
-            _check_simulation_positions(final_price)
-
-            change = round(final_price - _prev_price, 2) if _prev_price > 0 else 0
-            _prev_price = final_price
-
-            socketio.emit('price_tick', {
-                'price': final_price,
-                'change': change,
-                'source': src,
-                'timestamp': int(time.time() * 1000),
-                'positions': _get_positions_snapshot(final_price),
-                'daily_pnl': _get_daily_pnl(),
-            })
         except Exception as e:
-            _err_count += 1
-            if _err_count <= 3:
-                print(f"⚠️ Gold price updater hatası: {e}")
-        time.sleep(5)  # 5 saniye — TD her 15sn, PAXG her 5sn
+            print(f"⚠️ Fallback updater hatası: {e}")
+        time.sleep(5)
 
-threading.Thread(target=_gold_price_updater, daemon=True).start()
+threading.Thread(target=_fallback_price_updater, daemon=True).start()
 
 
 # ── GÜNLÜK $300 HEDEF SİSTEMİ ──
@@ -965,7 +1031,7 @@ def _fetch_from_finnhub():
     """Kaynak 2: Finnhub free tier — https://finnhub.io/register adresinden ücretsiz key alınabilir."""
     try:
         # Finnhub ücretsiz API key'i buraya yazılabilir
-        finnhub_key = os.environ.get('FINNHUB_API_KEY', 'd7cl039r01qv03esog30d7cl039r01qv03esog3g')
+        finnhub_key = FINNHUB_API_KEY
         if not finnhub_key:
             print("[EconCal] Finnhub SKIP — API key yok (FINNHUB_API_KEY env var ayarla)")
             return []
@@ -4363,6 +4429,20 @@ def get_event_predictions():
     except Exception as e:
         return jsonify({"predictions": [], "error": str(e)})
 
+
+@app.route('/api/price_source')
+def api_price_source():
+    """Fiyat kaynağı durumu — Finnhub WS + fallback bilgisi"""
+    ws_age = time.time() - _finnhub_state.get('last_ts', 0) if _finnhub_state.get('last_ts') else -1
+    return jsonify({
+        'finnhub_ws_connected': _finnhub_state['connected'],
+        'finnhub_last_price': _finnhub_state['last_price'],
+        'finnhub_last_age_sec': round(ws_age, 1) if ws_age >= 0 else None,
+        'finnhub_reconnects': _finnhub_state['reconnect_count'],
+        'current_source': _live_gold.get('source', ''),
+        'current_price': _live_gold.get('price', 0),
+        'current_ts': _live_gold.get('ts', 0),
+    })
 
 @app.route('/api/daily_pnl')
 def api_daily_pnl():
