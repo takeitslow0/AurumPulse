@@ -267,6 +267,7 @@ def fetch_live_gold_price():
     if p > 0:
         prices['twelvedata'] = p
         _live_gold['_td_last'] = p  # updater thread için cache'le
+        _live_gold['_td_last_ts'] = time.time()
 
     # 3) Gold-API.com
     p = _fetch_gold_from("gold-api", "https://gold-api.com/api/price/XAU",
@@ -275,20 +276,22 @@ def fetch_live_gold_price():
     if p > 0:
         prices['gold-api'] = p
 
-    # ── EN İYİ FİYATI SEÇ ──
+    # ── EN İYİ FİYATI SEÇ ── (_td_last'ı koruyarak güncelle)
     if len(prices) >= 2:
-        # Birden fazla kaynak var → ortalama al (sapmaları dengeler)
         avg = round(sum(prices.values()) / len(prices), 2)
         src = '+'.join(prices.keys())
-        _live_gold = {'price': avg, 'source': f"avg({src})", 'ts': time.time()}
+        _live_gold['price'] = avg
+        _live_gold['source'] = f"avg({src})"
+        _live_gold['ts'] = time.time()
         return avg
     elif len(prices) == 1:
         name, val = list(prices.items())[0]
-        # PAXG tek kaynaksa +$12 offset ekle (bilinen fark)
         if name == 'paxg':
             val = round(val + 12, 2)
             name = 'paxg+offset'
-        _live_gold = {'price': val, 'source': name, 'ts': time.time()}
+        _live_gold['price'] = val
+        _live_gold['source'] = name
+        _live_gold['ts'] = time.time()
         return val
 
     # Hiçbir kaynak çalışmadı
@@ -323,32 +326,43 @@ def _gold_price_updater():
             if paxg > 0:
                 paxg = round(paxg + 12, 2)  # Offset düzeltmesi
 
-            # ── KAYNAK 3: TwelveData cache (scanner'dan) ──
+            # ── KAYNAK 3: TwelveData cache (scanner'dan, max 2dk eski) ──
             td_price = _live_gold.get('_td_last', 0)
+            td_age = time.time() - _live_gold.get('_td_last_ts', 0)
 
             # ── EN İYİ FİYATI SEÇ ──
+            # Öncelik: TwelveData (en doğru) > gold-api > PAXG
             prices = {}
+            if td_price > 1000 and td_age < 120:
+                prices['td'] = td_price
             if gp > 1000:
                 prices['gold-api'] = gp
             if paxg > 1000:
                 prices['paxg'] = paxg
-            if td_price > 1000:
-                prices['td'] = td_price
 
-            if len(prices) >= 2:
-                # Birden fazla kaynak → ortalama
-                final_price = round(sum(prices.values()) / len(prices), 2)
-                src = f"avg({'+'.join(prices.keys())})"
-            elif len(prices) == 1:
-                name, val = list(prices.items())[0]
-                final_price = val
-                src = name
-            else:
-                # Hiçbir kaynak çalışmadı
+            if len(prices) == 0:
                 if _tick_count <= 3:
                     print(f"⚠️ Updater: hiçbir kaynak çalışmadı")
                 time.sleep(3)
                 continue
+
+            # TwelveData varsa onu ağırlıklı kullan (en doğru)
+            if 'td' in prices and len(prices) >= 2:
+                # TD'ye %70 ağırlık, diğerlerine %30
+                others = [v for k, v in prices.items() if k != 'td']
+                others_avg = sum(others) / len(others)
+                final_price = round(td_price * 0.7 + others_avg * 0.3, 2)
+                src = f"td+avg({'+'.join(prices.keys())})"
+            elif 'td' in prices:
+                final_price = td_price
+                src = "twelvedata"
+            elif len(prices) >= 2:
+                final_price = round(sum(prices.values()) / len(prices), 2)
+                src = f"avg({'+'.join(prices.keys())})"
+            else:
+                name, val = list(prices.items())[0]
+                final_price = val
+                src = name
 
             _live_gold['price'] = final_price
             _live_gold['source'] = src
