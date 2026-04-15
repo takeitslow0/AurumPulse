@@ -301,9 +301,11 @@ def fetch_live_gold_price():
 
 
 # ── HIZLI FİYAT GÜNCELLEME THREAD'İ ──
-# Çoklu kaynak: gold-api.com (limitsiz) + Binance PAXG + TwelveData cache
+# Her 15sn TwelveData /price (1 kredi) + PAXG aralarında
+# Kredi bütçesi: ~5760 çağrı/gün updater, scanner 120sn = ~720 çağrı
+# Toplam: ~700-800 kredi/gün (free plan 800)
 def _gold_price_updater():
-    """3 saniyede bir çoklu kaynaktan gold fiyatını günceller + frontend'e push eder."""
+    """5 saniyede bir fiyat günceller. Her 3. tick'te TwelveData çağırır (15sn)."""
     time.sleep(5)
     _err_count = 0
     _prev_price = 0
@@ -314,55 +316,48 @@ def _gold_price_updater():
             final_price = 0
             src = ""
 
-            # ── KAYNAK 1: gold-api.com (ücretsiz, limitsiz, API key yok) ──
-            gp = _fetch_gold_from("gold-api", "https://gold-api.com/api/price/XAU",
-                                  None,
-                                  lambda d: float(d.get('price', 0)) if d else 0)
+            # Her 3. tick'te (15sn) TwelveData /price çağır — 1 kredi
+            if _tick_count % 3 == 1:
+                td = _fetch_gold_from("td-live", f"{TD_BASE_URL}/price",
+                                      {"symbol": "XAU/USD", "apikey": TD_API_KEY},
+                                      lambda d: float(d['price']) if 'price' in d else 0)
+                if td > 1000:
+                    _live_gold['_td_last'] = td
+                    _live_gold['_td_last_ts'] = time.time()
 
-            # ── KAYNAK 2: Binance PAXG (ücretsiz, limitsiz, ~$12 düşük) ──
+            # Her tick: PAXG kontrol (ücretsiz)
             paxg = _fetch_gold_from("paxg", "https://api.binance.us/api/v3/ticker/price",
                                     {"symbol": "PAXGUSDT"},
                                     lambda d: float(d['price']) if d and 'price' in d else 0)
-            if paxg > 0:
-                paxg = round(paxg + 12, 2)  # Offset düzeltmesi
 
-            # ── KAYNAK 3: TwelveData cache (scanner'dan, max 2dk eski) ──
+            # Kaynakları topla
             td_price = _live_gold.get('_td_last', 0)
             td_age = time.time() - _live_gold.get('_td_last_ts', 0)
 
-            # ── EN İYİ FİYATI SEÇ ──
-            # Öncelik: TwelveData (en doğru) > gold-api > PAXG
             prices = {}
-            if td_price > 1000 and td_age < 120:
+            if td_price > 1000 and td_age < 60:
                 prices['td'] = td_price
-            if gp > 1000:
-                prices['gold-api'] = gp
             if paxg > 1000:
-                prices['paxg'] = paxg
+                prices['paxg'] = round(paxg + 12, 2)
 
-            if len(prices) == 0:
-                if _tick_count <= 3:
-                    print(f"⚠️ Updater: hiçbir kaynak çalışmadı")
-                time.sleep(3)
-                continue
-
-            # TwelveData varsa onu ağırlıklı kullan (en doğru)
-            if 'td' in prices and len(prices) >= 2:
-                # TD'ye %70 ağırlık, diğerlerine %30
-                others = [v for k, v in prices.items() if k != 'td']
-                others_avg = sum(others) / len(others)
-                final_price = round(td_price * 0.7 + others_avg * 0.3, 2)
-                src = f"td+avg({'+'.join(prices.keys())})"
+            if not prices:
+                # Eski TD cache'i kullan (120sn'ye kadar)
+                if td_price > 1000 and td_age < 120:
+                    final_price = td_price
+                    src = "td-cache"
+                else:
+                    time.sleep(5)
+                    continue
+            elif 'td' in prices and 'paxg' in prices:
+                # İkisi de var → TD'ye %80 ağırlık
+                final_price = round(td_price * 0.8 + prices['paxg'] * 0.2, 2)
+                src = "td+paxg"
             elif 'td' in prices:
                 final_price = td_price
                 src = "twelvedata"
-            elif len(prices) >= 2:
-                final_price = round(sum(prices.values()) / len(prices), 2)
-                src = f"avg({'+'.join(prices.keys())})"
             else:
-                name, val = list(prices.items())[0]
-                final_price = val
-                src = name
+                final_price = prices['paxg']
+                src = "paxg"
 
             _live_gold['price'] = final_price
             _live_gold['source'] = src
@@ -387,7 +382,7 @@ def _gold_price_updater():
             _err_count += 1
             if _err_count <= 3:
                 print(f"⚠️ Gold price updater hatası: {e}")
-        time.sleep(3)  # 3 saniye — gold-api.com + PAXG limitsiz
+        time.sleep(5)  # 5 saniye — TD her 15sn, PAXG her 5sn
 
 threading.Thread(target=_gold_price_updater, daemon=True).start()
 
@@ -3993,7 +3988,7 @@ def background_scanner():
         except Exception as e:
             print(f"Scanner Hatası #{_scan_count}: {e}")
             traceback.print_exc()
-        time.sleep(55)  # 55sn döngü — gold cache 120sn, her 2 döngüde 1 yeni veri
+        time.sleep(120)  # 120sn döngü — updater fiyat çekiyor, scanner sinyal/pattern için
 
 threading.Thread(target=background_scanner, daemon=True).start()
 
