@@ -4399,44 +4399,111 @@ CRYPTO_SYMBOLS = {
     'XRPUSDT': {'name': 'XRP',      'short': 'XRP', 'icon': '✕', 'decimals': 4},
 }
 
-BINANCE_BASE = "https://api.binance.com"
+# Birden fazla kripto API kaynağı — Binance ABD'den erişilemeyebilir
+BINANCE_ENDPOINTS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api.binance.us",
+]
+_working_binance = {'url': '', 'ts': 0}  # Son çalışan endpoint
+
+# CoinGecko ID mapping (fallback için)
+COINGECKO_IDS = {
+    'BTCUSDT': 'bitcoin', 'ETHUSDT': 'ethereum',
+    'SOLUSDT': 'solana', 'XRPUSDT': 'ripple'
+}
 
 # ── Crypto Cache ──
-_crypto_cache = {}      # {symbol: {'df': DataFrame, 'ts': timestamp, 'interval': str}}
+_crypto_cache = {}
 _crypto_cache_lock = threading.Lock()
 CRYPTO_CACHE_TTL = {'1m': 30, '5m': 120, '15m': 300, '1h': 900}
 
 # ── Crypto Positions & Trades ──
-_crypto_positions = {}   # {symbol: [position_dicts]}
-_crypto_trades = []      # Trade history
-CRYPTO_SIM_BALANCE = {'balance': 500.0}  # $500 başlangıç
-CRYPTO_MAX_POS = 2       # Coin başına max 2 pozisyon
+_crypto_positions = {}
+_crypto_trades = []
+CRYPTO_SIM_BALANCE = {'balance': 500.0}
+CRYPTO_MAX_POS = 2
+
+
+def _parse_binance_klines(data):
+    """Binance klines JSON → DataFrame"""
+    if not isinstance(data, list) or len(data) == 0:
+        return pd.DataFrame()
+    df = pd.DataFrame(data, columns=[
+        'open_time', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_vol', 'trades', 'taker_buy_base',
+        'taker_buy_quote', 'ignore'
+    ])
+    df['open'] = df['open'].astype(float)
+    df['high'] = df['high'].astype(float)
+    df['low'] = df['low'].astype(float)
+    df['close'] = df['close'].astype(float)
+    df['volume'] = df['volume'].astype(float)
+    df['datetime'] = pd.to_datetime(df['open_time'], unit='ms')
+    return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
 
 
 def binance_klines(symbol, interval='1m', limit=300):
-    """Binance'den mum verisi çeker — ücretsiz, key gereksiz"""
-    try:
-        resp = requests.get(f"{BINANCE_BASE}/api/v3/klines", params={
-            'symbol': symbol, 'interval': interval, 'limit': limit
-        }, timeout=10)
-        data = resp.json()
-        if not isinstance(data, list) or len(data) == 0:
-            return pd.DataFrame()
-        df = pd.DataFrame(data, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_vol', 'trades', 'taker_buy_base',
-            'taker_buy_quote', 'ignore'
-        ])
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-        df['datetime'] = pd.to_datetime(df['open_time'], unit='ms')
-        return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
-    except Exception as e:
-        print(f"❌ Binance klines hatası ({symbol}): {e}")
-        return pd.DataFrame()
+    """Kripto mum verisi — Binance (çoklu endpoint) + CoinGecko fallback"""
+
+    # Daha önce çalışan Binance endpoint varsa önce onu dene
+    if _working_binance['url'] and (time.time() - _working_binance['ts']) < 300:
+        try:
+            resp = requests.get(f"{_working_binance['url']}/api/v3/klines",
+                params={'symbol': symbol, 'interval': interval, 'limit': limit}, timeout=10)
+            if resp.status_code == 200:
+                df = _parse_binance_klines(resp.json())
+                if not df.empty:
+                    return df
+        except:
+            _working_binance['url'] = ''  # Artık çalışmıyor
+
+    # Tüm Binance endpointlerini dene
+    for base_url in BINANCE_ENDPOINTS:
+        try:
+            resp = requests.get(f"{base_url}/api/v3/klines",
+                params={'symbol': symbol, 'interval': interval, 'limit': limit}, timeout=10)
+            if resp.status_code == 200:
+                df = _parse_binance_klines(resp.json())
+                if not df.empty:
+                    _working_binance['url'] = base_url
+                    _working_binance['ts'] = time.time()
+                    print(f"✅ Binance çalışıyor: {base_url}")
+                    return df
+        except Exception as e:
+            continue
+
+    # Binance tamamen başarısız → TwelveData fallback (kripto da destekliyor)
+    td_symbol_map = {
+        'BTCUSDT': 'BTC/USD', 'ETHUSDT': 'ETH/USD',
+        'SOLUSDT': 'SOL/USD', 'XRPUSDT': 'XRP/USD'
+    }
+    td_interval_map = {'1m': '1min', '5m': '5min', '15m': '15min', '1h': '1h'}
+    td_sym = td_symbol_map.get(symbol)
+    td_int = td_interval_map.get(interval, '1min')
+
+    if td_sym:
+        try:
+            resp = requests.get(f"{TD_BASE_URL}/time_series", params={
+                'symbol': td_sym, 'interval': td_int, 'outputsize': min(limit, 120),
+                'apikey': TD_API_KEY, 'format': 'JSON', 'timezone': 'UTC'
+            }, timeout=12)
+            data = resp.json()
+            if data.get('status') == 'ok' and data.get('values'):
+                rows = data['values']
+                df = pd.DataFrame(rows)
+                df['datetime'] = pd.to_datetime(df['datetime'])
+                for col in ['open', 'high', 'low', 'close']:
+                    df[col] = df[col].astype(float)
+                df['volume'] = df.get('volume', pd.Series([0]*len(df))).astype(float)
+                df = df.sort_values('datetime').reset_index(drop=True)
+                print(f"📊 TwelveData fallback: {td_sym} ({len(df)} bar)")
+                return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+        except Exception as e:
+            print(f"❌ TwelveData kripto fallback hatası ({td_sym}): {e}")
+
+    print(f"❌ Kripto verisi alınamadı: {symbol} — tüm kaynaklar başarısız")
+    return pd.DataFrame()
 
 
 def get_crypto_data(symbol, interval='1m'):
