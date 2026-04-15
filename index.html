@@ -699,7 +699,14 @@
         });
         _socket.on('price_tick', (data) => {
           if (data && data.price > 0) {
-            $set('goldPrice', '$' + data.price.toFixed(2));
+            $set('mainPrice', '$' + data.price.toFixed(2));
+            // Fiyat değişim rengi
+            const el = document.getElementById('mainPrice');
+            if (el && lastPrice > 0) {
+              el.style.color = data.price > lastPrice ? 'var(--green)' : data.price < lastPrice ? 'var(--red)' : '';
+              setTimeout(() => { if(el) el.style.color = ''; }, 500);
+            }
+            lastPrice = data.price;
           }
         });
       }
