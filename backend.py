@@ -4029,6 +4029,7 @@ def background_scanner():
                 print(f"   💰 Canlı gold: ${live_p:.2f} (kaynak: {src})")
             payload = build_response_payload('1min')
             if payload:
+                _market_data_cache['1min'] = {'payload': payload, 'ts': time.time()}
                 socketio.emit('market_update', payload)
                 price = payload.get('gold_price', 0)
                 rsi = payload.get('gold_rsi', 50)
@@ -4545,6 +4546,8 @@ def get_trade_history():
     })
 
 
+_market_data_cache = {}  # interval → {'payload': ..., 'ts': ...}
+
 @app.route('/api/market_data')
 def get_market_data():
     try:
@@ -4552,9 +4555,21 @@ def get_market_data():
         valid_interval = get_validated_interval(interval)
         payload = build_response_payload(valid_interval)
         if payload is not None:
+            # Başarılı → cache'e kaydet
+            _market_data_cache[valid_interval] = {'payload': payload, 'ts': time.time()}
             return jsonify(payload)
         else:
-            return jsonify({"error": "Veri yok — TwelveData API'den cevap gelmedi. Piyasa kapali olabilir veya API limiti dolmus olabilir."})
+            # API başarısız → cache'ten dön (varsa)
+            cached = _market_data_cache.get(valid_interval)
+            if cached and (time.time() - cached['ts']) < 3600:  # 1 saat cache geçerli
+                # Fiyatı canlı fiyatla güncelle
+                cp = cached['payload'].copy()
+                if _live_gold.get('price', 0) > 0:
+                    cp['gold_price'] = round(_live_gold['price'], 2)
+                cp['_cached'] = True
+                cp['_cache_age'] = int(time.time() - cached['ts'])
+                return jsonify(cp)
+            return jsonify({"error": "Veri yok — TwelveData API limiti dolmus olabilir. Krediler gece yarisi sifirlanir."})
     except Exception as e:
         return jsonify({"error": f"Sunucu Hatası: {str(e)}"})
 
