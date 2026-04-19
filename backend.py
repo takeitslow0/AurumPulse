@@ -1813,8 +1813,14 @@ def fetch_timeseries(symbol, interval, outputsize=120):
         }
         resp = _safe_get(f"{TD_BASE_URL}/time_series", params)
         data = resp.json()
-        if data.get("status") == "error" or not data.get("values"):
-            print(f"⚠️ TwelveData HATA — {symbol}/{interval}: status={data.get('status')}, code={data.get('code')}, message={data.get('message', 'N/A')}")
+        # TD body-level errors: {"status":"error","code":429,"message":"..."} veya {"code":401,...}
+        if (isinstance(data, dict) and
+            (data.get("status") == "error" or
+             data.get("code") in (401, 403, 429) or
+             not data.get("values"))):
+            logger.warning("TwelveData time_series FAIL — %s/%s: code=%s status=%s msg=%s",
+                          symbol, interval, data.get('code'), data.get('status'),
+                          str(data.get('message', ''))[:150])
             return pd.DataFrame()
         df = pd.DataFrame(data.get("values"))
         if 'datetime' in df.columns:
@@ -5202,36 +5208,10 @@ def binance_klines(symbol, interval='1m', limit=300):
         except Exception as e:
             continue
 
-    # Binance tamamen başarısız → TwelveData fallback (kripto da destekliyor)
-    td_symbol_map = {
-        'BTCUSDT': 'BTC/USD', 'ETHUSDT': 'ETH/USD',
-        'SOLUSDT': 'SOL/USD', 'XRPUSDT': 'XRP/USD'
-    }
-    td_interval_map = {'1m': '1min', '5m': '5min', '15m': '15min', '1h': '1h'}
-    td_sym = td_symbol_map.get(symbol)
-    td_int = td_interval_map.get(interval, '1min')
-
-    if td_sym:
-        try:
-            resp = requests.get(f"{TD_BASE_URL}/time_series", params={
-                'symbol': td_sym, 'interval': td_int, 'outputsize': min(limit, 120),
-                'apikey': TD_API_KEY, 'format': 'JSON', 'timezone': 'UTC'
-            }, timeout=12)
-            data = resp.json()
-            if data.get('status') == 'ok' and data.get('values'):
-                rows = data['values']
-                df = pd.DataFrame(rows)
-                df['datetime'] = pd.to_datetime(df['datetime'])
-                for col in ['open', 'high', 'low', 'close']:
-                    df[col] = df[col].astype(float)
-                df['volume'] = df.get('volume', pd.Series([0]*len(df))).astype(float)
-                df = df.sort_values('datetime').reset_index(drop=True)
-                print(f"📊 TwelveData fallback: {td_sym} ({len(df)} bar)")
-                return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
-        except Exception as e:
-            logger.warning("TwelveData kripto fallback hatası (%s): %s", td_sym, e)
-
-    print(f"❌ Kripto verisi alınamadı: {symbol} — tüm kaynaklar başarısız")
+    # Binance başarısız → kripto verisini atla (TD fallback KAPALI — altın kredisini korur).
+    # Binance Railway'in ABD IP aralığını bloklayabiliyor; bu durumda kripto paneli
+    # veri olmadan görünür, ama altın (ana modül) TD kredisinden etkilenmez.
+    logger.warning("Kripto verisi alınamadı: %s — Binance erişilemez, TD fallback devre dışı (altın kredisi korumak için)", symbol)
     return pd.DataFrame()
 
 
