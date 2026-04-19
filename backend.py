@@ -309,15 +309,20 @@ def _td_circuit_record(success):
             logger.warning("TD circuit AÇILDI — %dsn boyunca TwelveData atlanacak", _TD_CIRCUIT_COOLDOWN)
 
 def _fetch_gold_from(name, url, params, extractor):
-    """Tek bir kaynaktan gold fiyatı çeker, hata varsa 0 döner."""
+    """Tek bir kaynaktan gold fiyatı çeker, hata varsa 0 döner.
+    TwelveData rate-limit'i HTTP 200 ile body'de code:429 döndürür — bunu yakalıyoruz."""
     try:
         resp = requests.get(url, params=params, timeout=6) if params else requests.get(url, timeout=6)
         if resp.status_code != 200:
             return 0
         data = resp.json()
+        # TD / diğerleri 200 altında error döndürebilir
+        if isinstance(data, dict) and (data.get('status') == 'error' or data.get('code') in (401, 403, 429)):
+            logger.warning("%s fetch error: %s", name, str(data.get('message', ''))[:200])
+            return 0
         p = extractor(data)
         return p if p > 1000 else 0
-    except:
+    except Exception:
         return 0
 
 
@@ -452,7 +457,7 @@ def _gold_realtime_updater():
     time.sleep(2)
     print("🚀 Gold realtime updater başladı — 1sn tick, 20sn fetch aralığı")
 
-    _fetch_interval = 120  # saniye — TwelveData /price çağrı aralığı (~720/gün, free 800 kredi sınırı)
+    _fetch_interval = 300  # saniye — TwelveData /price çağrı aralığı (~288/gün, free 800 kredi sınırı)
     _last_fetch = 0
 
     while not _shutdown_event.is_set():
@@ -691,7 +696,7 @@ def _interruptible_sleep(seconds):
     _shutdown_event.wait(timeout=seconds)
     return _shutdown_event.is_set()
 
-GOLD_TTL = {'1min': 120, '5min': 600, '15min': 900, '1h': 3600}
+GOLD_TTL = {'1min': 600, '5min': 1200, '15min': 1800, '1h': 3600}  # TD kredi tasarrufu
 DXY_TTL  = 3600  # DXY 1 saat cache — API tasarrufu
 HTF_TTL  = 3600  # 15dk cache 1 saat — API tasarrufu
 
@@ -4196,7 +4201,8 @@ def background_scanner():
         except Exception as e:
             print(f"Scanner Hatası #{_scan_count}: {e}")
             traceback.print_exc()
-        time.sleep(180)  # 180sn döngü — kredi tasarrufu, updater fiyat çekiyor
+        # 600sn döngü — kredi tasarrufu için artırıldı. Updater fiyatı zaten realtime tutuyor.
+        _interruptible_sleep(600)
 
 threading.Thread(target=background_scanner, daemon=True).start()
 
