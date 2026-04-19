@@ -4558,6 +4558,131 @@ def telegram_debug():
     })
 
 
+@app.route('/api/weekend_forecast')
+def api_weekend_forecast():
+    """Hafta sonu / piyasa kapalıyken açılışta beklenen yönü tahmin et.
+    Girdiler: teknik trend (son cache), jeopolitik tehdit, yaklaşan olaylar."""
+    try:
+        can_trade, status_msg = _can_open_trade()
+
+        # 1) Son teknik snapshot (cache)
+        tech = {'trend': 'nötr', 'rsi': 50, 'signal': '', 'price': 0, 'macd_hist': 0}
+        cached = _market_data_cache.get('1min')
+        if cached and cached.get('payload'):
+            p = cached['payload']
+            ts = p.get('trading_signals', {}) or {}
+            tech = {
+                'trend': ts.get('trend', 'nötr'),
+                'signal': ts.get('signal', ''),
+                'rsi': round(p.get('gold_rsi', 50), 1),
+                'price': p.get('gold_price', 0),
+                'macd_hist': round(p.get('gold_macd_hist', 0), 3),
+                'pattern': ts.get('pattern', ''),
+            }
+
+        # 2) Jeopolitik (safe-haven): yüksek tehdit = altın bullish
+        geo = get_cached_geopolitics() or {}
+        threat = geo.get('threat_level', 'LOW')
+        threat_emoji = geo.get('threat_emoji', '')
+        geo_score = geo.get('total_score', 0)
+        top_headline = ''
+        if geo.get('geo_articles'):
+            top_headline = geo['geo_articles'][0].get('title', '')[:120]
+
+        # 3) Yaklaşan high-impact olaylar
+        events = get_upcoming_events() or []
+        bullish_events = []
+        bearish_events = []
+        for ev in events[:15]:
+            if ev.get('status') == 'GEÇTİ':
+                continue
+            if ev.get('impact') != 'High':
+                continue
+            d = ev.get('gold_direction', '')
+            item = {
+                'title': ev.get('title', ''),
+                'time_label': ev.get('time_label', ''),
+                'direction': d,
+                'reason': ev.get('gold_reason', ''),
+            }
+            if 'YÜKSEL' in d:
+                bullish_events.append(item)
+            elif 'DÜŞ' in d:
+                bearish_events.append(item)
+
+        # 4) Composite bias
+        score = 0
+        reasons = []
+
+        if tech['trend'] == 'bullish':
+            score += 2
+            reasons.append({'type': 'technical',
+                            'text': f"Teknik trend yükseliş yönlü (RSI {tech['rsi']:.0f}, MACD hist {tech['macd_hist']:+.3f})"})
+        elif tech['trend'] == 'bearish':
+            score -= 2
+            reasons.append({'type': 'technical',
+                            'text': f"Teknik trend düşüş yönlü (RSI {tech['rsi']:.0f}, MACD hist {tech['macd_hist']:+.3f})"})
+        else:
+            reasons.append({'type': 'technical',
+                            'text': f"Teknik nötr (RSI {tech['rsi']:.0f})"})
+
+        if threat in ('HIGH', 'CRITICAL', 'EXTREME'):
+            score += 3
+            reasons.append({'type': 'geopolitics',
+                            'text': f"Jeopolitik tehdit {threat} — safe-haven altın alımı beklenir" +
+                                    (f" • {top_headline}" if top_headline else '')})
+        elif threat == 'ELEVATED':
+            score += 1
+            reasons.append({'type': 'geopolitics',
+                            'text': f"Jeopolitik tehdit artışta ({threat_emoji} {threat})"})
+
+        net_events = len(bullish_events) - len(bearish_events)
+        score += net_events
+        if bullish_events:
+            reasons.append({'type': 'events',
+                            'text': f"{len(bullish_events)} yaklaşan olay altın lehine",
+                            'items': bullish_events[:3]})
+        if bearish_events:
+            reasons.append({'type': 'events',
+                            'text': f"{len(bearish_events)} yaklaşan olay altın aleyhine",
+                            'items': bearish_events[:3]})
+
+        # 5) Karar
+        if score >= 3:
+            direction, label, emoji = 'bullish', 'Yükseliş bekleniyor', '📈'
+        elif score <= -3:
+            direction, label, emoji = 'bearish', 'Düşüş bekleniyor', '📉'
+        elif score >= 1:
+            direction, label, emoji = 'lean_bullish', 'Hafif yükseliş eğilimi', '↗️'
+        elif score <= -1:
+            direction, label, emoji = 'lean_bearish', 'Hafif düşüş eğilimi', '↘️'
+        else:
+            direction, label, emoji = 'neutral', 'Yön belirsiz', '↔️'
+
+        confidence = min(abs(score) * 15, 85)
+
+        return jsonify({
+            'market_closed': not can_trade,
+            'status_msg': status_msg,
+            'direction': direction,
+            'label': label,
+            'emoji': emoji,
+            'confidence': confidence,
+            'composite_score': score,
+            'technical': tech,
+            'threat_level': threat,
+            'threat_emoji': threat_emoji,
+            'geo_total_score': geo_score,
+            'bullish_event_count': len(bullish_events),
+            'bearish_event_count': len(bearish_events),
+            'reasons': reasons,
+            'generated_at': int(time.time() * 1000),
+        })
+    except Exception:
+        logger.exception("weekend_forecast hatası")
+        return jsonify({'error': 'forecast_failed'}), 500
+
+
 @app.route('/api/event_predictions')
 def get_event_predictions():
     """Yaklaşan olayların altın yön tahminlerini döndür"""

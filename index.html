@@ -49,11 +49,25 @@
     .status-pill.live{background:var(--green-dim);color:var(--green)}
     .status-pill.dead{background:var(--red-dim);color:var(--red)}
     .status-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
-    .market-banner{display:flex;align-items:center;gap:12px;padding:10px 16px;margin:8px 12px 0;background:linear-gradient(90deg,rgba(239,68,68,0.10),rgba(212,168,67,0.08));border:1px solid rgba(239,68,68,0.35);border-radius:8px;color:var(--red)}
+    .market-banner{display:flex;flex-direction:column;gap:10px;padding:10px 16px;margin:8px 12px 0;background:linear-gradient(90deg,rgba(239,68,68,0.10),rgba(212,168,67,0.08));border:1px solid rgba(239,68,68,0.35);border-radius:8px;color:var(--red)}
+    .market-banner-row{display:flex;align-items:center;gap:12px}
     .market-banner-icon{font-size:20px}
     .market-banner-text{display:flex;flex-direction:column;gap:2px;flex:1}
     .market-banner-title{font-size:13px;font-weight:600;color:var(--red)}
     .market-banner-sub{font-size:11px;color:var(--text2);font-family:var(--mono)}
+    .market-forecast{padding:10px 12px;background:rgba(0,0,0,0.28);border:1px solid rgba(255,255,255,0.06);border-radius:6px}
+    .mf-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+    .mf-emoji{font-size:18px}
+    .mf-label{font-size:13px;font-weight:600;color:var(--text1)}
+    .mf-confidence{margin-left:auto;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--blue-dim);color:var(--blue);font-family:var(--mono)}
+    .mf-reasons{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:4px}
+    .mf-reasons li{font-size:11px;color:var(--text2);padding-left:16px;position:relative}
+    .mf-reasons li::before{content:'•';position:absolute;left:4px;color:var(--gold)}
+    .mf-reasons li.type-technical::before{color:var(--blue)}
+    .mf-reasons li.type-geopolitics::before{color:var(--red)}
+    .mf-reasons li.type-events::before{color:var(--gold)}
+    .market-banner.bullish{border-color:rgba(34,197,94,0.4);background:linear-gradient(90deg,rgba(34,197,94,0.08),rgba(212,168,67,0.06))}
+    .market-banner.bearish{border-color:rgba(239,68,68,0.45);background:linear-gradient(90deg,rgba(239,68,68,0.12),rgba(212,168,67,0.06))}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
     /* ═══ PANELS ═══ */
@@ -251,10 +265,20 @@
 
       <!-- Market hours banner (hidden when market is open) -->
       <div id="marketBanner" class="market-banner" style="display:none">
-        <span class="market-banner-icon">⚠️</span>
-        <div class="market-banner-text">
-          <div class="market-banner-title">Market Closed</div>
-          <div class="market-banner-sub" id="marketBannerSub">Next open in –</div>
+        <div class="market-banner-row">
+          <span class="market-banner-icon">⚠️</span>
+          <div class="market-banner-text">
+            <div class="market-banner-title">Market Closed</div>
+            <div class="market-banner-sub" id="marketBannerSub">Next open in –</div>
+          </div>
+        </div>
+        <div id="marketForecast" class="market-forecast" style="display:none">
+          <div class="mf-head">
+            <span id="mfEmoji" class="mf-emoji">↔️</span>
+            <span id="mfLabel" class="mf-label">Yön belirsiz</span>
+            <span id="mfConfidence" class="mf-confidence">–</span>
+          </div>
+          <ul id="mfReasons" class="mf-reasons"></ul>
         </div>
       </div>
 
@@ -791,7 +815,11 @@
       const banner = document.getElementById('marketBanner');
       if (!banner) return;
       const closed = ds && ds.can_trade === false && /PİYASA KAPALI|Market Closed|weekend/i.test(ds.status_msg || '');
-      if (!closed) { banner.style.display = 'none'; return; }
+      if (!closed) {
+        banner.style.display = 'none';
+        banner.classList.remove('bullish','bearish');
+        return;
+      }
       banner.style.display = 'flex';
       const openAt = nextMarketOpenUTC();
       if (!openAt) return;
@@ -804,6 +832,48 @@
       const mins = Math.floor((diffMs % 3600000) / 60000);
       const sub = document.getElementById('marketBannerSub');
       if (sub) sub.textContent = `XAU/USD opens ${localStr} (local) — in ${hrs}h ${mins}m`;
+    }
+
+    async function loadWeekendForecast() {
+      try {
+        const res = await fetch(`${API_BASE}/api/weekend_forecast`);
+        const f = await res.json();
+        const banner = document.getElementById('marketBanner');
+        const box = document.getElementById('marketForecast');
+        if (!banner || !box) return;
+        if (!f.market_closed) {
+          box.style.display = 'none';
+          banner.classList.remove('bullish','bearish');
+          return;
+        }
+        box.style.display = 'block';
+        banner.classList.remove('bullish','bearish');
+        if (f.direction === 'bullish' || f.direction === 'lean_bullish') banner.classList.add('bullish');
+        else if (f.direction === 'bearish' || f.direction === 'lean_bearish') banner.classList.add('bearish');
+        document.getElementById('mfEmoji').textContent = f.emoji || '↔️';
+        document.getElementById('mfLabel').textContent = f.label || 'Yön belirsiz';
+        document.getElementById('mfConfidence').textContent = `Güven: ${f.confidence}%`;
+        const ul = document.getElementById('mfReasons');
+        ul.innerHTML = '';
+        (f.reasons || []).forEach(r => {
+          const li = document.createElement('li');
+          li.className = 'type-' + (r.type || 'general');
+          li.textContent = r.text;
+          ul.appendChild(li);
+          if (r.items) {
+            r.items.forEach(it => {
+              const sub = document.createElement('li');
+              sub.className = 'type-events';
+              sub.style.marginLeft = '14px';
+              sub.style.fontSize = '10px';
+              sub.textContent = `↳ ${it.title}${it.time_label ? ' · ' + it.time_label : ''}`;
+              ul.appendChild(sub);
+            });
+          }
+        });
+      } catch (e) {
+        console.warn('weekend_forecast fetch failed', e);
+      }
     }
 
     async function loadTradeHistory() {
@@ -1246,7 +1316,7 @@
     }
 
     setTimeout(initLoad, 1500);
-    setTimeout(() => { loadEventPredictions(); loadTradeHistory(); }, 2500);
+    setTimeout(() => { loadEventPredictions(); loadTradeHistory(); loadWeekendForecast(); }, 2500);
     checkTelegramStatus();
 
     // Market banner countdown — her dakika güncelle (veri gerektirmez, sadece kalan süre)
@@ -1256,6 +1326,9 @@
         updateMarketBanner({ can_trade: false, status_msg: 'PİYASA KAPALI' });
       }
     }, 60000);
+
+    // Forecast'i 5 dakikada bir yeniden çek (haber/olaylar değişebilir)
+    setInterval(loadWeekendForecast, 300000);
   </script>
 </body>
 </html>
