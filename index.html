@@ -746,7 +746,7 @@
         const tbody = document.getElementById('historyBody');
         if (!tbody) return;
         tbody.innerHTML = data.records.map(r => {
-          const time = new Date(r.timestamp).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+          const time = new Date(r.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
           return `<tr><td>${time}</td><td style="color:var(--gold)">$${parseFloat(r.price).toFixed(2)}</td><td>${parseFloat(r.rsi).toFixed(1)}</td><td>${parseFloat(r.dxy).toFixed(3)}</td></tr>`;
         }).join('');
       } catch (e) {}
@@ -824,8 +824,8 @@
           if (tradeTable) tradeTable.style.display = 'table';
           if (tbody) {
             tbody.innerHTML = data.trades.slice().reverse().map((t, i) => {
-              const openDate = new Date(t.open_time * 1000).toLocaleString('tr-TR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
-              const closeDate = new Date(t.close_time * 1000).toLocaleString('tr-TR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+              const openDate = new Date(t.open_time * 1000).toLocaleString('en-GB', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+              const closeDate = new Date(t.close_time * 1000).toLocaleString('en-GB', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
               const dirCls = t.trend === 'bullish' ? 'long' : 'short';
               const dirText = t.trend === 'bullish' ? 'LONG' : 'SHORT';
               const resCls = t.result.includes('TP') ? 'tp' : 'sl';
@@ -876,7 +876,7 @@
         $set('topVwap', data.vwap ? '$' + data.vwap.toFixed(2) : '--');
         $set('topDxy', data.dxy_price ? data.dxy_price.toFixed(3) : '--');
         $set('topAtr', data.trading_signals ? data.trading_signals.atr : '--');
-        $set('lastUpdate', new Date().toLocaleTimeString('tr-TR'));
+        $set('lastUpdate', new Date().toLocaleTimeString('en-GB'));
         $set('historyCount', data.history_count || 0);
         $set('rsiValueBadge', data.gold_rsi ? data.gold_rsi.toFixed(1) : '--');
 
