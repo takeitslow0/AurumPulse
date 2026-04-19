@@ -4033,11 +4033,15 @@ def build_response_payload(interval='1min'):
                     elif trend == 'SHORT':
                         trend = 'bearish'
 
-                    # Check: don't open 2 positions with same trend
-                    same_trend_exists = any(p['trend'] == trend for p in _active_positions)
-                    if same_trend_exists:
+                    # v6.4: Aynı yön + aynı pattern bloklanır; farklı pattern + aynı yön İZİNLİ
+                    pattern_name_check = pattern_signal.get('pattern', 'UNKNOWN')
+                    same_pattern_exists = any(
+                        p['trend'] == trend and p.get('pattern', '') == pattern_name_check
+                        for p in _active_positions
+                    )
+                    if same_pattern_exists:
                         trend = 'nötr'
-                        sig_type = "SINYAL: Aynı yöne zaten açık pozisyon var"
+                        sig_type = f"SINYAL: {pattern_name_check} aynı yönde zaten açık"
                         pattern_signal = None
                     else:
                         sl = pattern_signal.get('sl', 0)
