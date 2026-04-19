@@ -924,7 +924,7 @@ PATTERN_CONFIG = {
     'flag_max_consolidation': 20,
 }
 
-# v5.7 Trade Management
+# v5.7 Trade Management + v6.2 optimizasyonlar
 TRADE_MGMT = {
     'tp_dollars': 20.0,
     'sl_dollars': 5.0,
@@ -942,6 +942,37 @@ TRADE_MGMT = {
     'equity_risk_pct': 2.0,
     'equity_high_conf_mult': 2.0,
     'high_conf_threshold': 80,
+    # v6.2: rejim filtresi + kalite eşiği + pattern cooldown
+    'htf_regime_filter': True,      # 15dk HTF EMA yönüne ters sinyal atma
+    'min_confidence': 70,           # %70 altı pattern'leri atla
+    'pattern_cooldown_sec': 1800,   # Aynı pattern için 30 dk cooldown (arka arkaya spam önler)
+}
+
+# Pattern bazlı son tetiklenme zamanı — cooldown için
+_pattern_last_fire = {}
+_pattern_fire_lock = threading.Lock()
+
+# Pattern confidence re-kalibrasyonu (backtest 30-gün WR ortalamalarına dayalı).
+# Eski değerler fazla iyimser — gerçek WR genelde hardcoded değerden düşük.
+PATTERN_CONFIDENCE_CAP = {
+    'DOUBLE_BOTTOM': 72,    # Eski 82 — son haftada 0/19
+    'DOUBLE_TOP': 68,
+    'HEAD_SHOULDERS': 75,
+    'INV_HEAD_SHOULDERS': 75,
+    'BULL_FLAG': 65,
+    'BEAR_FLAG': 65,
+    'RISING_WEDGE': 60,
+    'FALLING_WEDGE': 60,
+    'ASCENDING_TRIANGLE': 65,
+    'DESCENDING_TRIANGLE': 65,
+    'SYMMETRIC_TRIANGLE': 55,
+    'TRIPLE_TOP': 78,
+    'TRIPLE_BOTTOM': 78,
+    'CUP_AND_HANDLE': 78,
+    'CHANNEL_UP': 62,
+    'CHANNEL_DOWN': 62,
+    'ROUNDING_BOTTOM': 70,
+    'PENNANT': 60,
 }
 
 def calculate_position_size(sl_distance, account_balance=None, risk_pct=None):
@@ -2979,12 +3010,54 @@ def generate_pattern_signal(current_price, atr_val, balance):
     confidence = pattern_info.get('confidence', 0)
     pattern_height = pattern_info.get('height', 0)
 
-    # v5.7: EMA Filter
+    # v6.2: Pattern confidence cap — backtest'e dayalı kalibrasyon
+    cap = PATTERN_CONFIDENCE_CAP.get(pattern_name)
+    if cap is not None and confidence > cap:
+        confidence = cap
+
+    # v6.2: Minimum güven eşiği
+    min_conf = TRADE_MGMT.get('min_confidence', 0)
+    if confidence < min_conf:
+        print(f"   ⊘ {pattern_name} atlandı — güven {confidence}% < {min_conf}%")
+        return None
+
+    # v6.2: Pattern-level cooldown (spam önler)
+    cooldown = TRADE_MGMT.get('pattern_cooldown_sec', 0)
+    if cooldown > 0:
+        with _pattern_fire_lock:
+            last = _pattern_last_fire.get(pattern_name, 0)
+            if time.time() - last < cooldown:
+                remaining = int(cooldown - (time.time() - last))
+                print(f"   ⊘ {pattern_name} cooldown aktif ({remaining}sn)")
+                return None
+
+    # v5.7: EMA Filter (5dk)
     if TRADE_MGMT['ema_filter_enabled']:
         if direction == 'LONG' and ema20 <= ema50:
             return None  # Bearish EMA → skip LONG
         elif direction == 'SHORT' and ema20 >= ema50:
             return None  # Bullish EMA → skip SHORT
+
+    # v6.2: HTF (15dk) rejim filtresi — en önemli fix
+    # Son 7 günde 19/19 SL olan tüm LONG'lar HTF düşüş trendinde tetiklenmişti.
+    if TRADE_MGMT.get('htf_regime_filter', False):
+        try:
+            htf_df = get_htf_data()
+            if not htf_df.empty and len(htf_df) >= 3 and 'EMA20' in htf_df.columns and 'EMA50' in htf_df.columns:
+                htf_ema20 = safe_float(htf_df.iloc[-1]['EMA20'], 0)
+                htf_ema50 = safe_float(htf_df.iloc[-1]['EMA50'], 0)
+                htf_ema20_prev = safe_float(htf_df.iloc[-3]['EMA20'], htf_ema20)
+                htf_bullish = htf_ema20 > htf_ema50 and htf_ema20 >= htf_ema20_prev
+                htf_bearish = htf_ema20 < htf_ema50 and htf_ema20 <= htf_ema20_prev
+                if direction == 'LONG' and not htf_bullish:
+                    print(f"   ⊘ {pattern_name} atlandı — HTF 15dk trend düşüş/yatay (EMA20={htf_ema20:.2f} EMA50={htf_ema50:.2f})")
+                    return None
+                if direction == 'SHORT' and not htf_bearish:
+                    print(f"   ⊘ {pattern_name} atlandı — HTF 15dk trend yükseliş/yatay")
+                    return None
+        except Exception:
+            logger.exception("HTF regime filter hatası")
+            # Hata halinde filtreyi atla, normal akışa devam et
 
     # Calculate SL (use neckline if available, else ATR-based)
     neckline = pattern_info.get('neckline', 0)
@@ -3020,6 +3093,10 @@ def generate_pattern_signal(current_price, atr_val, balance):
     else:
         tp1 = current_price - (tp_dollars / (lot * ACCOUNT_CONFIG['contract_size']))
         tp2 = current_price - (tp_dollars * 1.5 / (lot * ACCOUNT_CONFIG['contract_size']))
+
+    # v6.2: Sinyal üretildi → cooldown zamanını kaydet
+    with _pattern_fire_lock:
+        _pattern_last_fire[pattern_name] = time.time()
 
     return {
         'pattern': pattern_name,
