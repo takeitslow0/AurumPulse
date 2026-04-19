@@ -632,6 +632,20 @@
 
   <script>
     const API_BASE = window.location.origin;
+
+    // Hassas POST endpoint'leri için API key. localStorage'da saklanır, yoksa prompt.
+    function getApiKey() {
+      let k = localStorage.getItem('aurumpulse_api_key') || '';
+      if (!k) {
+        k = prompt('API_KEY girin (backend .env dosyasındaki değer):') || '';
+        if (k) localStorage.setItem('aurumpulse_api_key', k);
+      }
+      return k;
+    }
+    function authHeaders(extra = {}) {
+      return { 'X-API-Key': getApiKey(), ...extra };
+    }
+
     let currentInterval = '1min';
     let candleChart = null, rsiChart = null, equityChart = null;
     let liveCandles = [];
@@ -1107,8 +1121,8 @@
       const chatId = document.getElementById('tgChatId').value.trim();
       if (!token || !chatId) { showToast('Hata', 'Token ve Chat ID gerekli', 'error'); return; }
       fetch(`${API_BASE}/api/telegram/setup`, {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ bot_token: token, chat_id: chatId })
+        method: 'POST', headers: authHeaders({'Content-Type':'application/json'}),
+        body: JSON.stringify({ token: token, chat_id: chatId })
       }).then(r => r.json()).then(d => {
         showToast('Telegram', d.status === 'ok' ? 'Kaydedildi' : 'Hata oluştu');
         checkTelegramStatus();
@@ -1116,7 +1130,7 @@
     }
 
     function testTelegram() {
-      fetch(`${API_BASE}/api/telegram/test_signal`, { method: 'POST' })
+      fetch(`${API_BASE}/api/telegram/test_signal`, { method: 'POST', headers: authHeaders() })
         .then(r => r.json())
         .then(d => showToast('Telegram', d.status === 'ok' ? 'Test mesajı gönderildi' : 'Gönderilemedi'))
         .catch(() => showToast('Hata', 'Bağlantı hatası'));
@@ -1140,7 +1154,7 @@
     async function confirmReset() {
       closeResetModal();
       try {
-        await fetch(`${API_BASE}/api/reset_balance`, { method: 'POST' });
+        await fetch(`${API_BASE}/api/reset_balance`, { method: 'POST', headers: authHeaders() });
         showToast('Reset', 'Simülasyon sıfırlandı — $100.00');
         loadTradeHistory();
       } catch(e) { showToast('Hata', 'Reset başarısız'); }

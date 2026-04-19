@@ -343,6 +343,19 @@
 
 <script>
 const API_BASE = window.location.origin;
+
+// Hassas POST endpoint'leri için API key (index.html ile aynı localStorage key'i).
+function getApiKey() {
+  let k = localStorage.getItem('aurumpulse_api_key') || '';
+  if (!k) {
+    k = prompt('API_KEY girin (backend .env dosyasındaki değer):') || '';
+    if (k) localStorage.setItem('aurumpulse_api_key', k);
+  }
+  return k;
+}
+function authHeaders(extra = {}) {
+  return { 'X-API-Key': getApiKey(), ...extra };
+}
 let currentInterval = '1m';
 let selectedCoin = null;
 let coinChart = null;
@@ -563,7 +576,7 @@ async function loadTradeStats() {
 function showResetModal() { document.getElementById('resetModal').classList.add('active'); }
 function closeResetModal() { document.getElementById('resetModal').classList.remove('active'); }
 async function resetSim() {
-  try { await fetch(`${API_BASE}/api/crypto/reset`, { method: 'POST' }); } catch(e) {}
+  try { await fetch(`${API_BASE}/api/crypto/reset`, { method: 'POST', headers: authHeaders() }); } catch(e) {}
   closeResetModal();
   loadAllData();
   loadTradeStats();

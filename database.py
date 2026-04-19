@@ -52,6 +52,22 @@ def init_db():
             ON trade_history (close_time DESC)
         ''')
 
+        # Açık pozisyonlar — restart'ta korunsun diye persist edilir.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS active_positions (
+                open_time    INTEGER PRIMARY KEY,
+                trend        TEXT,
+                entry        REAL,
+                sl           REAL,
+                tp1          REAL,
+                tp2          REAL,
+                tp1_hit      INTEGER DEFAULT 0,
+                lot          REAL DEFAULT 0.01,
+                pattern      TEXT DEFAULT '',
+                data_json    TEXT
+            )
+        ''')
+
         conn.commit()
         print(f"✅ Veritabanı '{DB_NAME}' hazır.")
 
@@ -239,6 +255,66 @@ def load_all_trades():
         return trades
     except sqlite3.Error as e:
         print(f"❌ Trade Yükleme Hatası: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_active_positions(positions: list):
+    """Açık pozisyonları DB'ye replace-all stratejisi ile yazar.
+    Max 3 pozisyon olduğu için delete+insert maliyeti ihmal edilebilir.
+    Her mutation (append/pop/update) sonrası çağrılır.
+    """
+    conn = None
+    try:
+        import json
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM active_positions')
+        for pos in positions:
+            cursor.execute('''
+                INSERT INTO active_positions
+                    (open_time, trend, entry, sl, tp1, tp2, tp1_hit, lot, pattern, data_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                int(pos.get('open_time', 0)),
+                pos.get('trend', ''),
+                float(pos.get('entry', 0)),
+                float(pos.get('sl', 0)),
+                float(pos.get('tp1', 0)),
+                float(pos.get('tp2', 0)),
+                1 if pos.get('tp1_hit') else 0,
+                float(pos.get('lot', 0.01)),
+                pos.get('pattern', ''),
+                json.dumps(pos, default=str),
+            ))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"❌ Aktif pozisyon kaydetme hatası: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def load_active_positions():
+    """Restart sonrası açık pozisyonları DB'den yükler."""
+    conn = None
+    try:
+        import json
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('SELECT data_json FROM active_positions')
+        rows = cursor.fetchall()
+        positions = []
+        for (blob,) in rows:
+            try:
+                positions.append(json.loads(blob))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return positions
+    except sqlite3.Error as e:
+        print(f"❌ Aktif pozisyon yükleme hatası: {e}")
         return []
     finally:
         if conn:

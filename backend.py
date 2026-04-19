@@ -6,19 +6,68 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import time
+import logging
+import sys
 from datetime import datetime, timezone, timedelta
 import feedparser
 import traceback
 import random as _rnd  # tick simülasyonu için
-from database import init_db, save_market_data, get_recent_history, save_trade, load_all_trades
+from database import (init_db, save_market_data, get_recent_history, save_trade,
+                       load_all_trades, save_active_positions, load_active_positions)
+
+# ─────────────────────────────────────────
+# LOGGING — stdout'a yapılandırılmış log.
+# Level env'den: LOG_LEVEL=DEBUG|INFO|WARNING|ERROR (varsayılan INFO).
+# ─────────────────────────────────────────
+_log_level = getattr(logging, __import__('os').environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    stream=sys.stdout,
+)
+logger = logging.getLogger('aurumpulse')
 
 import os
+import secrets
+from functools import wraps
+
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# .env dosyasını yükle (python-dotenv opsiyonel — yoksa OS env kullanılır)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(_BASE_DIR, '.env'))
+except ImportError:
+    pass
+
+# CORS origin'leri env'den oku — virgülle ayrılmış liste. Default: dev için *
+_cors_origins_env = os.environ.get('CORS_ORIGINS', '*').strip()
+_cors_origins = [o.strip() for o in _cors_origins_env.split(',')] if _cors_origins_env != '*' else '*'
+
+# API key — sensitive POST endpoint'leri için. Set edilmezse random üretilir ve stdout'a yazılır.
+API_KEY = os.environ.get('API_KEY', '').strip()
+if not API_KEY:
+    API_KEY = secrets.token_urlsafe(24)
+    print(f"⚠️  API_KEY env'de tanımlı değil. Geçici key üretildi: {API_KEY}")
+    print(f"   Kalıcı için .env'e ekleyin: API_KEY={API_KEY}")
+
 app = Flask(__name__, static_folder=None)  # static_folder devre dışı — route'larla çakışmasın
-app.config['SECRET_KEY'] = 'aurumpulse-secret'
-CORS(app, resources={r"/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading',
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY') or secrets.token_hex(32)
+CORS(app, resources={r"/*": {"origins": _cors_origins}})
+socketio = SocketIO(app, cors_allowed_origins=_cors_origins, async_mode='threading',
                     allow_unsafe_werkzeug=True)
+
+
+def require_api_key(fn):
+    """Hassas POST endpoint'leri için basit API key auth."""
+    @wraps(fn)
+    def _wrapped(*args, **kwargs):
+        provided = request.headers.get('X-API-Key') or (request.get_json(silent=True) or {}).get('api_key')
+        if provided != API_KEY:
+            return jsonify({"error": "unauthorized"}), 401
+        return fn(*args, **kwargs)
+    return _wrapped
 
 
 @app.route('/')
@@ -31,39 +80,39 @@ def health_check():
     return jsonify({"status": "ok"}), 200
 
 @app.route('/api/reset_balance', methods=['POST'])
+@require_api_key
 def reset_balance():
     """Simülasyon bakiyesini sıfırla — $100'e geri dön"""
     global _active_positions, _trade_history
-    # Açık pozisyonları kapat
-    _active_positions = []
-    # Trade geçmişini temizle
-    _trade_history = []
-    # DB'den de sil
+    with _state_lock:
+        _active_positions = []
+        _trade_history = []
+        ACCOUNT_CONFIG['balance'] = 100.0
+        _daily_state['trades_today'] = 0
+        _daily_state['pnl_today'] = 0
+        _daily_state['consecutive_losses'] = 0
+        _daily_state['paused_until'] = 0
+        _daily_state['pause_reason'] = ''
     try:
         import sqlite3
         conn = sqlite3.connect(os.path.join(_BASE_DIR, 'aurumpulse.db'))
         conn.execute('DELETE FROM trade_history')
+        conn.execute('DELETE FROM active_positions')
         conn.commit()
         conn.close()
-    except Exception as e:
-        print(f"⚠️ DB temizleme hatası: {e}")
-    # Bakiyeyi resetle
-    ACCOUNT_CONFIG['balance'] = 100.0
-    # Günlük istatistikleri sıfırla
-    _daily_state['trades_today'] = 0
-    _daily_state['pnl_today'] = 0
-    _daily_state['consecutive_losses'] = 0
-    _daily_state['paused_until'] = 0
-    _daily_state['pause_reason'] = ''
+    except Exception:
+        logger.exception("DB temizleme hatası")
     print("🔄 Simülasyon sıfırlandı — Bakiye: $100.00")
     return jsonify({"status": "ok", "balance": 100.0, "message": "Simülasyon sıfırlandı"})
 
 # ─────────────────────────────────────────
 # TELEGRAM BOT AYARLARI
 # ─────────────────────────────────────────
-TELEGRAM_ENABLED = True
-TELEGRAM_BOT_TOKEN = "8717946753:AAFVvb25nFheZTUTLxPDbSiTa0MeAFZ1Fuo"
-TELEGRAM_CHAT_ID = "6794012842"
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
+TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+if not TELEGRAM_ENABLED:
+    print("ℹ️  Telegram devre dışı — TELEGRAM_BOT_TOKEN ve TELEGRAM_CHAT_ID env'de tanımlı değil")
 
 _last_telegram_signal = None  # Aynı sinyali tekrar göndermeyi önle
 
@@ -92,8 +141,8 @@ def _send_telegram(text):
             else:
                 print(f"❌ Telegram düz metin de başarısız: {resp2.text}")
                 return False
-    except Exception as e:
-        print(f"⚠️ Telegram bağlantı hatası: {e}")
+    except Exception:
+        logger.exception("Telegram bağlantı hatası")
         return False
 
 
@@ -151,7 +200,7 @@ def send_telegram_signal(trend, entry, sl, tp1, tp2, confidence, quality_score, 
         _send_telegram(msg)
 
     except Exception as e:
-        print(f"⚠️ Telegram sinyal hazırlama hatası: {e}")
+        logger.exception("Telegram sinyal hazırlama hatası")
         import traceback
         traceback.print_exc()
 
@@ -181,7 +230,7 @@ def send_telegram_close(result_type, entry, exit_price, pnl):
 
         _send_telegram(msg)
     except Exception as e:
-        print(f"⚠️ Telegram kapanış hatası: {e}")
+        logger.exception("Telegram kapanış hatası")
 
 init_db()
 
@@ -206,8 +255,10 @@ def safe_float(val, default=0.0, decimals=4):
 # ─────────────────────────────────────────
 # TWELVE DATA AYARLARI
 # ─────────────────────────────────────────
-TD_API_KEY  = "475598133d5a49ae82220c6a4fcaaf9b"
+TD_API_KEY  = os.environ.get('TWELVEDATA_API_KEY', '').strip()
 TD_BASE_URL = "https://api.twelvedata.com"
+if not TD_API_KEY:
+    logger.warning("TWELVEDATA_API_KEY env'de tanımlı değil — altın fiyat fetch çalışmayacak")
 
 
 GOLD_SYMBOL    = "XAU/USD"
@@ -233,6 +284,29 @@ def get_validated_interval(p):
 _live_gold = {'price': 0, 'source': '', 'ts': 0}
 
 _gold_source_errors = {}
+
+# ── TD circuit breaker — kredi tasarrufu için ──
+# 3 ardışık başarısızlık → 10dk TD'yi atla, doğrudan PAXG'ye geç.
+_td_circuit = {'fails': 0, 'blocked_until': 0}
+_TD_CIRCUIT_THRESHOLD = 3
+_TD_CIRCUIT_COOLDOWN = 600  # 10 dakika
+
+def _td_circuit_allow():
+    """TD çağrısı yapılabilir mi? Blocked ise False döner."""
+    return time.time() >= _td_circuit['blocked_until']
+
+def _td_circuit_record(success):
+    """TD çağrı sonucunu kaydet. Ardışık fail eşiği aşılırsa blokla."""
+    if success:
+        if _td_circuit['fails'] > 0:
+            logger.info("TD circuit: başarı → fail sayacı sıfırlandı")
+        _td_circuit['fails'] = 0
+    else:
+        _td_circuit['fails'] += 1
+        if _td_circuit['fails'] >= _TD_CIRCUIT_THRESHOLD:
+            _td_circuit['blocked_until'] = time.time() + _TD_CIRCUIT_COOLDOWN
+            _td_circuit['fails'] = 0
+            logger.warning("TD circuit AÇILDI — %dsn boyunca TwelveData atlanacak", _TD_CIRCUIT_COOLDOWN)
 
 def _fetch_gold_from(name, url, params, extractor):
     """Tek bir kaynaktan gold fiyatı çeker, hata varsa 0 döner."""
@@ -381,36 +455,37 @@ def _gold_realtime_updater():
     _fetch_interval = 120  # saniye — TwelveData /price çağrı aralığı (~720/gün, free 800 kredi sınırı)
     _last_fetch = 0
 
-    while True:
+    while not _shutdown_event.is_set():
         try:
             now = time.time()
 
             # ── GERÇEK FİYAT FETCH (her _fetch_interval saniyede) ──
             if now - _last_fetch >= _fetch_interval:
                 _last_fetch = now
-                _tick_state['fetch_count'] += 1
+                with _tick_lock:
+                    _tick_state['fetch_count'] += 1
 
-                td = _fetch_gold_from("td-live", f"{TD_BASE_URL}/price",
-                                      {"symbol": "XAU/USD", "apikey": TD_API_KEY},
-                                      lambda d: float(d['price']) if 'price' in d else 0)
+                # Circuit breaker: TD ardışık 3 kez başarısız olduysa 10dk atla.
+                if _td_circuit_allow():
+                    td = _fetch_gold_from("td-live", f"{TD_BASE_URL}/price",
+                                          {"symbol": "XAU/USD", "apikey": TD_API_KEY},
+                                          lambda d: float(d['price']) if 'price' in d else 0)
+                    _td_circuit_record(success=(td > 1000))
+                else:
+                    td = 0  # circuit açık — doğrudan PAXG fallback'e geç
                 if td > 1000:
-                    old_real = _tick_state['real_price']
-                    _tick_state['real_price'] = td
-                    _tick_state['real_ts'] = now
-                    _live_gold['_td_last'] = td
-                    _live_gold['_td_last_ts'] = now
-
-                    # İlk fiyat veya büyük sapma → sim_price'ı sıfırla
-                    if _tick_state['sim_price'] <= 0 or abs(td - _tick_state['sim_price']) > 5:
-                        _tick_state['sim_price'] = td
-
-                    # Gerçek fiyat değişiminden volatilite tahmin et
-                    if old_real > 0:
-                        real_change = abs(td - old_real)
-                        # Volatiliteyi gerçek hareketle adapt et
-                        _tick_state['volatility'] = max(0.05, min(0.5,
-                            _tick_state['volatility'] * 0.7 + real_change * 0.03))
-
+                    with _tick_lock:
+                        old_real = _tick_state['real_price']
+                        _tick_state['real_price'] = td
+                        _tick_state['real_ts'] = now
+                        _live_gold['_td_last'] = td
+                        _live_gold['_td_last_ts'] = now
+                        if _tick_state['sim_price'] <= 0 or abs(td - _tick_state['sim_price']) > 5:
+                            _tick_state['sim_price'] = td
+                        if old_real > 0:
+                            real_change = abs(td - old_real)
+                            _tick_state['volatility'] = max(0.05, min(0.5,
+                                _tick_state['volatility'] * 0.7 + real_change * 0.03))
                     _emit_price_tick(td, "realtime")
                     time.sleep(1)
                     continue
@@ -421,10 +496,11 @@ def _gold_realtime_updater():
                                             lambda d: float(d['price']) if d and 'price' in d else 0)
                     if paxg > 1000:
                         paxg_adj = round(paxg + 12, 2)
-                        _tick_state['real_price'] = paxg_adj
-                        _tick_state['real_ts'] = now
-                        if _tick_state['sim_price'] <= 0:
-                            _tick_state['sim_price'] = paxg_adj
+                        with _tick_lock:
+                            _tick_state['real_price'] = paxg_adj
+                            _tick_state['real_ts'] = now
+                            if _tick_state['sim_price'] <= 0:
+                                _tick_state['sim_price'] = paxg_adj
                         _emit_price_tick(paxg_adj, "paxg-live")
                         time.sleep(1)
                         continue
@@ -439,7 +515,7 @@ def _gold_realtime_updater():
                 _emit_price_tick(_tick_state['real_price'], "realtime")
 
         except Exception as e:
-            print(f"⚠️ Realtime updater hatası: {e}")
+            logger.exception("Realtime updater hatası")
 
         time.sleep(1)  # Her saniye bir tick
 
@@ -452,9 +528,12 @@ DAILY_TARGET = 300.0
 def _get_daily_pnl():
     """Bugünkü toplam P/L hesapla"""
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    with _state_lock:
+        th_snap = list(_trade_history)
+        ap_snap = list(_active_positions)
     total = 0
     closed_count = 0
-    for t in _trade_history:
+    for t in th_snap:
         ts = t.get('close_time', 0)
         if ts > 0:
             trade_date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d')
@@ -465,7 +544,7 @@ def _get_daily_pnl():
     unrealized = 0
     price = _live_gold.get('price', 0)
     if price > 0:
-        for pos in _active_positions:
+        for pos in ap_snap:
             lot_sz = pos.get('lot', 0.01)
             if pos['trend'] == 'bullish':
                 unrealized += (price - pos['entry']) * lot_sz * ACCOUNT_CONFIG['contract_size']
@@ -503,8 +582,10 @@ def _calculate_auto_lot(sl_distance):
 
 def _get_positions_snapshot(current_price):
     """Açık pozisyonların anlık durumu"""
+    with _state_lock:
+        ap_snap = list(_active_positions)
     positions = []
-    for pos in _active_positions:
+    for pos in ap_snap:
         lot_sz = pos.get('lot', 0.01)
         contract = ACCOUNT_CONFIG['contract_size']
         if pos['trend'] == 'bullish':
@@ -528,39 +609,45 @@ def _get_positions_snapshot(current_price):
 def _check_simulation_positions(current_price):
     """Her fiyat tick'inde pozisyonları kontrol et (SL/TP)"""
     global _active_positions
-    if not _active_positions or current_price <= 0:
-        return
-    for idx in range(len(_active_positions) - 1, -1, -1):
-        pos = _active_positions[idx]
-        lot_sz = pos.get('lot', 0.01)
-        contract = ACCOUNT_CONFIG['contract_size']
+    mutated = False
+    with _state_lock:
+        if not _active_positions or current_price <= 0:
+            return
+        for idx in range(len(_active_positions) - 1, -1, -1):
+            pos = _active_positions[idx]
+            lot_sz = pos.get('lot', 0.01)
+            contract = ACCOUNT_CONFIG['contract_size']
 
-        if pos['trend'] == 'bullish':
-            if current_price <= pos['sl']:
-                pnl = (current_price - pos['entry']) * lot_sz * contract
-                _record_trade(pos, current_price, "STOP-LOSS", pnl)
-                _active_positions.pop(idx)
-            elif current_price >= pos.get('tp2', pos['tp1']):
-                pnl = (current_price - pos['entry']) * lot_sz * contract
-                _record_trade(pos, current_price, "TP2", pnl)
-                _active_positions.pop(idx)
-            elif current_price >= pos['tp1'] and not pos.get('tp1_hit'):
-                _active_positions[idx]['tp1_hit'] = True
-                tp1_dist = pos['tp1'] - pos['entry']
-                _active_positions[idx]['sl'] = round(pos['entry'] + tp1_dist * 0.3, 2)
-        elif pos['trend'] == 'bearish':
-            if current_price >= pos['sl']:
-                pnl = (pos['entry'] - current_price) * lot_sz * contract
-                _record_trade(pos, current_price, "STOP-LOSS", pnl)
-                _active_positions.pop(idx)
-            elif current_price <= pos.get('tp2', pos['tp1']):
-                pnl = (pos['entry'] - current_price) * lot_sz * contract
-                _record_trade(pos, current_price, "TP2", pnl)
-                _active_positions.pop(idx)
-            elif current_price <= pos['tp1'] and not pos.get('tp1_hit'):
-                _active_positions[idx]['tp1_hit'] = True
-                tp1_dist = pos['entry'] - pos['tp1']
-                _active_positions[idx]['sl'] = round(pos['entry'] - tp1_dist * 0.3, 2)
+            if pos['trend'] == 'bullish':
+                if current_price <= pos['sl']:
+                    pnl = (current_price - pos['entry']) * lot_sz * contract
+                    _record_trade(pos, current_price, "STOP-LOSS", pnl)
+                    _active_positions.pop(idx); mutated = True
+                elif current_price >= pos.get('tp2', pos['tp1']):
+                    pnl = (current_price - pos['entry']) * lot_sz * contract
+                    _record_trade(pos, current_price, "TP2", pnl)
+                    _active_positions.pop(idx); mutated = True
+                elif current_price >= pos['tp1'] and not pos.get('tp1_hit'):
+                    _active_positions[idx]['tp1_hit'] = True
+                    tp1_dist = pos['tp1'] - pos['entry']
+                    _active_positions[idx]['sl'] = round(pos['entry'] + tp1_dist * 0.3, 2)
+                    mutated = True
+            elif pos['trend'] == 'bearish':
+                if current_price >= pos['sl']:
+                    pnl = (pos['entry'] - current_price) * lot_sz * contract
+                    _record_trade(pos, current_price, "STOP-LOSS", pnl)
+                    _active_positions.pop(idx); mutated = True
+                elif current_price <= pos.get('tp2', pos['tp1']):
+                    pnl = (pos['entry'] - current_price) * lot_sz * contract
+                    _record_trade(pos, current_price, "TP2", pnl)
+                    _active_positions.pop(idx); mutated = True
+                elif current_price <= pos['tp1'] and not pos.get('tp1_hit'):
+                    _active_positions[idx]['tp1_hit'] = True
+                    tp1_dist = pos['entry'] - pos['tp1']
+                    _active_positions[idx]['sl'] = round(pos['entry'] - tp1_dist * 0.3, 2)
+                    mutated = True
+    if mutated:
+        _persist_positions()
 
 
 # ─────────────────────────────────────────
@@ -589,6 +676,21 @@ _dxy_cache  = {'df': pd.DataFrame(), 'sym': '', 'ts': 0}
 _htf_cache  = {'df': pd.DataFrame(), 'ts': 0}  # 15dk HTF cache
 _cache_lock = threading.Lock()
 
+# Thread-safety: _active_positions / _trade_history / _daily_state / ACCOUNT_CONFIG.balance
+# RLock — scanner içindeki iç içe çağrılarda deadlock olmasın.
+_state_lock = threading.RLock()
+# _tick_state için ayrı lock — tek yazıcı (updater thread), çoklu okuyucu.
+_tick_lock = threading.Lock()
+
+# Graceful shutdown: background thread'ler bu event'i kontrol eder.
+# SIGTERM/SIGINT geldiğinde set edilir → loop'lar break eder.
+_shutdown_event = threading.Event()
+
+def _interruptible_sleep(seconds):
+    """time.sleep yerine kullan — shutdown sinyalinde erken uyanır."""
+    _shutdown_event.wait(timeout=seconds)
+    return _shutdown_event.is_set()
+
 GOLD_TTL = {'1min': 120, '5min': 600, '15min': 900, '1h': 3600}
 DXY_TTL  = 3600  # DXY 1 saat cache — API tasarrufu
 HTF_TTL  = 3600  # 15dk cache 1 saat — API tasarrufu
@@ -607,10 +709,36 @@ def _init_trade_history():
     global _trade_history
     loaded = load_all_trades()
     if loaded:
-        _trade_history = loaded
-        total_pnl = sum(t.get('pnl', 0) for t in loaded)
-        ACCOUNT_CONFIG['balance'] = round(100.0 + total_pnl, 2)
+        with _state_lock:
+            _trade_history = loaded
+            total_pnl = sum(t.get('pnl', 0) for t in loaded)
+            ACCOUNT_CONFIG['balance'] = round(100.0 + total_pnl, 2)
         print(f"💰 Hesap bakiyesi DB'den yüklendi: ${ACCOUNT_CONFIG['balance']}")
+
+
+def _init_active_positions():
+    """Backend başlarken açık pozisyonları DB'den yükler (restart-safe)."""
+    global _active_positions
+    try:
+        loaded = load_active_positions()
+        if loaded:
+            with _state_lock:
+                _active_positions = loaded
+            print(f"📌 {len(loaded)} açık pozisyon DB'den restore edildi")
+    except Exception:
+        logger.exception("Açık pozisyon restore hatası")
+
+
+def _persist_positions():
+    """Açık pozisyonları DB'ye flush et. Her mutation sonrası çağrılmalı.
+    Lock ALTINDA çağrılabilir — save_active_positions SQLite I/O yapar ama
+    max 3 pozisyon olduğu için <1ms. Yine de lock dışında tutmak daha güvenli."""
+    try:
+        with _state_lock:
+            snap = list(_active_positions)
+        save_active_positions(snap)
+    except Exception:
+        logger.exception("Pozisyon persist hatası")
 
 # _init_trade_history() → ACCOUNT_CONFIG tanımlandıktan sonra çağrılacak
 
@@ -683,33 +811,43 @@ def _can_open_trade():
 
 def _record_trade_result(pnl):
     """Trade sonucunu günlük istatistiklere kaydet"""
-    _check_daily_reset()
-    _daily_state['trades_today'] += 1
-    _daily_state['pnl_today'] += pnl
+    with _state_lock:
+        _check_daily_reset()
+        _daily_state['trades_today'] += 1
+        _daily_state['pnl_today'] += pnl
+        breaker_fired = False
+        daily_limit_hit = False
 
-    if pnl < 0:
-        _daily_state['consecutive_losses'] += 1
-        # Ardışık kayıp devre kesici
-        if _daily_state['consecutive_losses'] >= DAILY_SAFETY['max_consecutive_losses']:
-            cooldown_sec = DAILY_SAFETY['cooldown_after_streak_min'] * 60
-            _daily_state['paused_until'] = int(time.time()) + cooldown_sec
-            _daily_state['pause_reason'] = f"Art arda {_daily_state['consecutive_losses']} kayıp"
-            print(f"⚠️ DEVRE KESİCİ: {_daily_state['consecutive_losses']} ardışık kayıp → {DAILY_SAFETY['cooldown_after_streak_min']}dk duraklama")
-            if TELEGRAM_ENABLED:
-                _send_telegram(f"⚠️ <b>DEVRE KESİCİ AKTİF</b>\n"
-                              f"Art arda {_daily_state['consecutive_losses']} kayıp.\n"
-                              f"Trading {DAILY_SAFETY['cooldown_after_streak_min']} dakika duraklatıldı.\n"
-                              f"Günlük P/L: ${_daily_state['pnl_today']:+.2f}")
-    else:
-        _daily_state['consecutive_losses'] = 0  # Kazanç = seri sıfırla
+        if pnl < 0:
+            _daily_state['consecutive_losses'] += 1
+            if _daily_state['consecutive_losses'] >= DAILY_SAFETY['max_consecutive_losses']:
+                cooldown_sec = DAILY_SAFETY['cooldown_after_streak_min'] * 60
+                _daily_state['paused_until'] = int(time.time()) + cooldown_sec
+                _daily_state['pause_reason'] = f"Art arda {_daily_state['consecutive_losses']} kayıp"
+                breaker_fired = True
+        else:
+            _daily_state['consecutive_losses'] = 0
 
-    # Günlük kayıp limiti kontrolü
-    max_loss = ACCOUNT_CONFIG['balance'] * (DAILY_SAFETY['max_daily_loss_pct'] / 100)
-    if _daily_state['pnl_today'] <= -max_loss:
-        print(f"🛑 GÜNLÜK KAYIP LİMİTİ: ${_daily_state['pnl_today']:.2f} → Gün sonu kadar trade yok")
+        max_loss = ACCOUNT_CONFIG['balance'] * (DAILY_SAFETY['max_daily_loss_pct'] / 100)
+        if _daily_state['pnl_today'] <= -max_loss:
+            daily_limit_hit = True
+
+        # Bildirim için snapshot
+        snap = dict(_daily_state)
+
+    # Lock dışında I/O (Telegram + stdout) — deadlock riskini azalt.
+    if breaker_fired:
+        print(f"⚠️ DEVRE KESİCİ: {snap['consecutive_losses']} ardışık kayıp → {DAILY_SAFETY['cooldown_after_streak_min']}dk duraklama")
+        if TELEGRAM_ENABLED:
+            _send_telegram(f"⚠️ <b>DEVRE KESİCİ AKTİF</b>\n"
+                          f"Art arda {snap['consecutive_losses']} kayıp.\n"
+                          f"Trading {DAILY_SAFETY['cooldown_after_streak_min']} dakika duraklatıldı.\n"
+                          f"Günlük P/L: ${snap['pnl_today']:+.2f}")
+    if daily_limit_hit:
+        print(f"🛑 GÜNLÜK KAYIP LİMİTİ: ${snap['pnl_today']:.2f} → Gün sonu kadar trade yok")
         if TELEGRAM_ENABLED:
             _send_telegram(f"🛑 <b>GÜNLÜK KAYIP LİMİTİ</b>\n"
-                          f"Bugünkü kayıp: ${_daily_state['pnl_today']:.2f}\n"
+                          f"Bugünkü kayıp: ${snap['pnl_today']:.2f}\n"
                           f"Limit: -${max_loss:.2f} (-%{DAILY_SAFETY['max_daily_loss_pct']})\n"
                           f"Gün sonuna kadar yeni trade açılmayacak.")
 
@@ -744,12 +882,13 @@ def _record_trade(pos, exit_price, result_type, pnl):
         'pattern': pos.get('pattern', ''),
         'lot': pos.get('lot', 0.01),
     }
-    _trade_history.append(trade)
-    # SQLite'a kalıcı kaydet
+    with _state_lock:
+        _trade_history.append(trade)
+    # SQLite'a kalıcı kaydet (lock dışında — I/O)
     try:
         save_trade(trade)
     except Exception as e:
-        print(f"⚠️ Trade DB kayıt hatası: {e}")
+        logger.exception("Trade DB kayıt hatası")
     # v3.12: Günlük istatistikleri güncelle
     _record_trade_result(pnl)
 
@@ -768,6 +907,8 @@ ACCOUNT_CONFIG = {
 
 # DB'den trade geçmişini yükle ve bakiyeyi güncelle
 _init_trade_history()
+# DB'den açık pozisyonları restore et (restart-safe)
+_init_active_positions()
 
 # v5.7 Pattern Strategy Config
 PATTERN_CONFIG = {
@@ -1024,7 +1165,7 @@ def _fetch_from_finnhub():
     """Kaynak 2: Finnhub free tier — https://finnhub.io/register adresinden ücretsiz key alınabilir."""
     try:
         # Finnhub ücretsiz API key'i buraya yazılabilir
-        finnhub_key = os.environ.get('FINNHUB_API_KEY', 'd7fpabhr01qqb8rh48b0d7fpabhr01qqb8rh48bg')
+        finnhub_key = os.environ.get('FINNHUB_API_KEY', '').strip()
         if not finnhub_key:
             print("[EconCal] Finnhub SKIP — API key yok (FINNHUB_API_KEY env var ayarla)")
             return []
@@ -3522,6 +3663,7 @@ def build_response_payload(interval='1min'):
                 send_telegram_close("KILL SWITCH", pos['entry'], current_price, pnl_close)
                 _record_trade(pos, current_price, "KILL_SWITCH", pnl_close)
             _active_positions = []
+            _persist_positions()
             trend = "kilitli"
             sig_type = kill_switch_status.get('message', 'KİLİTLİ')
 
@@ -3538,6 +3680,7 @@ def build_response_payload(interval='1min'):
             else:
               # ── AKTİF POZİSYONLAR KONTROLÜ — iterate in reverse to safely remove ──
               closed_any = False
+              pos_mutated = False
 
               for idx in range(len(_active_positions) - 1, -1, -1):
                 pos = _active_positions[idx]
@@ -3567,6 +3710,7 @@ def build_response_payload(interval='1min'):
                         tp1_dist = pos['tp1'] - pos['entry']
                         trail_lock_sl = pos['entry'] + tp1_dist * 0.30
                         _active_positions[idx]['sl'] = round(trail_lock_sl, 2)
+                        pos_mutated = True
                     else:
                         # v3.2 — AKILLI ERKEN ÇIKIŞ (LONG)
                         early_exit = False
@@ -3615,6 +3759,7 @@ def build_response_payload(interval='1min'):
                         tp1_dist = pos['entry'] - pos['tp1']
                         trail_lock_sl = pos['entry'] - tp1_dist * 0.30
                         _active_positions[idx]['sl'] = round(trail_lock_sl, 2)
+                        pos_mutated = True
                     else:
                         # v3.2 — AKILLI ERKEN ÇIKIŞ (SHORT)
                         early_exit = False
@@ -3639,6 +3784,9 @@ def build_response_payload(interval='1min'):
                             closed_any = True
                             print(f"   ⚡ EARLY EXIT SHORT: {time_in_trade}sn, loss=${unrealized_loss:.2f}, PnL=${pnl_close:.2f}")
 
+              # Scanner close-loop sonunda pozisyon mutasyonlarını DB'ye flush et
+              if closed_any or pos_mutated:
+                  _persist_positions()
               # If all positions closed in this loop, generate new signal in next block
               if closed_any and not _active_positions:
                   # Kapandıysa yeni sinyal üret
@@ -3749,6 +3897,7 @@ def build_response_payload(interval='1min'):
                                 'pattern': pattern_name,
                                 'dynamic_tp_dollars': pattern_signal.get('dynamic_tp_dollars', TRADE_MGMT['tp_dollars']),
                             })
+                            _persist_positions()
                             # Telegram'a sinyal gönder
                             _temp_risk = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
                             _temp_risk['lot_size'] = lot  # Use pattern lot
@@ -3901,6 +4050,7 @@ def build_response_payload(interval='1min'):
                             'pattern': _pattern_label,
                             'dynamic_tp_dollars': TRADE_MGMT['tp_dollars'],
                         })
+                        _persist_positions()
                         _temp_risk = calculate_risk_metrics(current_price, sl, tp1, tp2, trend)
                         send_telegram_signal(
                             trend, current_price, round(sl, 2), round(tp1, 2), round(tp2, 2),
@@ -4008,7 +4158,7 @@ def build_response_payload(interval='1min'):
             }
         }
     except Exception as e:
-        print(f"❌❌❌ PAYLOAD BUILD HATASI: {e}")
+        logger.exception("PAYLOAD BUILD HATASI")
         traceback.print_exc()
         return None
 
@@ -4018,7 +4168,7 @@ def build_response_payload(interval='1min'):
 def background_scanner():
     time.sleep(5)
     _scan_count = 0
-    while True:
+    while not _shutdown_event.is_set():
         t0 = time.time()
         _scan_count += 1
         try:
@@ -4182,7 +4332,7 @@ def check_and_send_event_alerts():
 # Olay uyarıcısı arka plan thread'i (her 60sn kontrol)
 def event_alert_scanner():
     time.sleep(30)
-    while True:
+    while not _shutdown_event.is_set():
         try:
             check_and_send_event_alerts()
         except Exception as e:
@@ -4308,6 +4458,7 @@ def get_cached_geopolitics():
 # API ENDPOINT'LERİ
 # ─────────────────────────────────────────
 @app.route('/api/telegram/setup', methods=['POST'])
+@require_api_key
 def setup_telegram():
     """Telegram bot token ve chat ID ayarla"""
     global TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -4352,6 +4503,7 @@ def telegram_status():
 
 
 @app.route('/api/telegram/test_signal', methods=['POST'])
+@require_api_key
 def test_telegram_signal():
     """Test amaçlı Telegram'a örnek sinyal gönder"""
     if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -4386,13 +4538,16 @@ def test_telegram_signal():
 @app.route('/api/telegram/debug')
 def telegram_debug():
     """Telegram ve sinyal durumu debug bilgisi"""
+    with _state_lock:
+        _ap_snap = list(_active_positions)
+        _th_count = len(_trade_history)
     return jsonify({
         "telegram_enabled": TELEGRAM_ENABLED,
         "token_set": bool(TELEGRAM_BOT_TOKEN),
         "chat_id_set": bool(TELEGRAM_CHAT_ID),
-        "active_positions": _active_positions,
-        "active_positions_count": len(_active_positions),
-        "trade_history_count": len(_trade_history),
+        "active_positions": _ap_snap,
+        "active_positions_count": len(_ap_snap),
+        "trade_history_count": _th_count,
         "last_telegram_signal": _last_telegram_signal
     })
 
@@ -4425,15 +4580,17 @@ def get_event_predictions():
 @app.route('/api/price_source')
 def api_price_source():
     """Fiyat kaynağı durumu — realtime tick bilgisi"""
-    real_age = time.time() - _tick_state.get('real_ts', 0) if _tick_state.get('real_ts') else -1
+    with _tick_lock:
+        snap = dict(_tick_state)
+    real_age = time.time() - snap.get('real_ts', 0) if snap.get('real_ts') else -1
     return jsonify({
         'mode': 'realtime-tick-sim',
-        'real_price': _tick_state['real_price'],
-        'sim_price': _tick_state['sim_price'],
+        'real_price': snap['real_price'],
+        'sim_price': snap['sim_price'],
         'real_age_sec': round(real_age, 1) if real_age >= 0 else None,
-        'momentum': round(_tick_state['momentum'], 3),
-        'volatility': round(_tick_state['volatility'], 3),
-        'fetch_count': _tick_state['fetch_count'],
+        'momentum': round(snap['momentum'], 3),
+        'volatility': round(snap['volatility'], 3),
+        'fetch_count': snap['fetch_count'],
         'current_source': _live_gold.get('source', ''),
         'current_price': _live_gold.get('price', 0),
     })
@@ -4453,8 +4610,10 @@ def api_positions():
 def api_closed_today():
     """Bugün kapatılan işlemler"""
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    with _state_lock:
+        th_snap = list(_trade_history)
     trades = []
-    for t in _trade_history:
+    for t in th_snap:
         ts = t.get('close_time', 0)
         if ts > 0:
             trade_date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d')
@@ -4475,7 +4634,10 @@ def api_geopolitics():
 @app.route('/api/trade_history')
 def get_trade_history():
     """İşlem geçmişi ve performans istatistikleri"""
-    trades = list(_trade_history)
+    with _state_lock:
+        trades = list(_trade_history)
+        positions_snap = list(_active_positions)
+        daily_snap = dict(_daily_state)
     total = len(trades)
     wins = [t for t in trades if t['pnl'] > 0]
     losses = [t for t in trades if t['pnl'] <= 0]
@@ -4530,18 +4692,18 @@ def get_trade_history():
                 "tp1": p['tp1'],
                 "tp2": p['tp2'],
                 "pattern": p.get('pattern', '')
-            } for p in _active_positions
-        ] if _active_positions else [],
+            } for p in positions_snap
+        ],
         "daily_safety": {
-            "trades_today": _daily_state['trades_today'],
+            "trades_today": daily_snap['trades_today'],
             "max_trades": DAILY_SAFETY['max_trades_per_day'],
-            "pnl_today": round(_daily_state['pnl_today'], 2),
+            "pnl_today": round(daily_snap['pnl_today'], 2),
             "max_loss": round(-max_loss, 2),
-            "consecutive_losses": _daily_state['consecutive_losses'],
+            "consecutive_losses": daily_snap['consecutive_losses'],
             "max_consecutive": DAILY_SAFETY['max_consecutive_losses'],
             "can_trade": can_trade,
             "status_msg": safety_msg if not can_trade else "✅ Trading aktif",
-            "paused": _daily_state['paused_until'] > time.time()
+            "paused": daily_snap['paused_until'] > time.time()
         }
     })
 
@@ -4864,7 +5026,7 @@ def binance_klines(symbol, interval='1m', limit=300):
                 print(f"📊 TwelveData fallback: {td_sym} ({len(df)} bar)")
                 return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
         except Exception as e:
-            print(f"❌ TwelveData kripto fallback hatası ({td_sym}): {e}")
+            logger.warning("TwelveData kripto fallback hatası (%s): %s", td_sym, e)
 
     print(f"❌ Kripto verisi alınamadı: {symbol} — tüm kaynaklar başarısız")
     return pd.DataFrame()
@@ -5259,6 +5421,7 @@ def crypto_trade_history():
 
 
 @app.route('/api/crypto/reset', methods=['POST'])
+@require_api_key
 def crypto_reset():
     """Kripto simülasyon sıfırla"""
     global _crypto_positions, _crypto_trades
@@ -5273,7 +5436,7 @@ def crypto_scanner():
     """30 saniyede bir tüm kripto coinleri tarar"""
     time.sleep(8)  # Gold scanner'dan sonra başla
     _scan = 0
-    while True:
+    while not _shutdown_event.is_set():
         _scan += 1
         try:
             all_signals = {}
@@ -5299,7 +5462,7 @@ def crypto_scanner():
                 coins_str = " | ".join([f"{CRYPTO_SYMBOLS[s]['short']}:{d.get('trend','?')}" for s, d in all_signals.items()])
                 print(f"🪙 Crypto scan #{_scan}: {coins_str}")
         except Exception as e:
-            print(f"❌ Crypto scanner hatası #{_scan}: {e}")
+            logger.exception("Crypto scanner hatası #%d", _scan)
             traceback.print_exc()
         time.sleep(30)
 
@@ -5309,13 +5472,33 @@ threading.Thread(target=crypto_scanner, daemon=True).start()
 # ═══════════════════════════════════════════════════════════════
 
 
+def _graceful_shutdown(signum, frame):
+    """SIGTERM/SIGINT handler — background thread'leri temiz kapatır."""
+    logger.info("Shutdown sinyali alındı (signum=%s) — thread'ler durduruluyor...", signum)
+    _shutdown_event.set()
+    # Pozisyonları son kez DB'ye flush et
+    try:
+        _persist_positions()
+    except Exception:
+        logger.exception("Shutdown sırasında pozisyon persist hatası")
+
+
 if __name__ == '__main__':
+    import signal
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+    signal.signal(signal.SIGINT, _graceful_shutdown)
+
     print("🚀 AurumPulse Backend başlatılıyor...")
     print("📊 Birleşik Sinyal Motoru: MTF + Price Action + Bollinger Squeeze")
     print("🪙 Kripto Modülü: BTC, ETH, SOL, XRP (Binance API)")
     print("💡 WebSocket 500 alıyorsan: pip install simple-websocket")
     port = int(os.environ.get('PORT', 5000))
     print(f"🌐 Port: {port}")
-    socketio.run(app, debug=False, host='0.0.0.0', port=port,
-                 use_reloader=False, log_output=True,
-                 allow_unsafe_werkzeug=True)
+    try:
+        socketio.run(app, debug=False, host='0.0.0.0', port=port,
+                     use_reloader=False, log_output=True,
+                     allow_unsafe_werkzeug=True)
+    finally:
+        _shutdown_event.set()
+        logger.info("Server kapandı, background thread'ler için 3sn bekleniyor...")
+        time.sleep(3)
