@@ -56,16 +56,30 @@
     .market-banner-title{font-size:13px;font-weight:600;color:var(--red)}
     .market-banner-sub{font-size:11px;color:var(--text2);font-family:var(--mono)}
     .market-forecast{padding:10px 12px;background:rgba(0,0,0,0.28);border:1px solid rgba(255,255,255,0.06);border-radius:6px}
-    .mf-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
-    .mf-emoji{font-size:18px}
-    .mf-label{font-size:13px;font-weight:600;color:var(--text1)}
-    .mf-confidence{margin-left:auto;font-size:11px;padding:2px 8px;border-radius:10px;background:var(--blue-dim);color:var(--blue);font-family:var(--mono)}
-    .mf-reasons{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:4px}
-    .mf-reasons li{font-size:11px;color:var(--text2);padding-left:16px;position:relative}
-    .mf-reasons li::before{content:'•';position:absolute;left:4px;color:var(--gold)}
-    .mf-reasons li.type-technical::before{color:var(--blue)}
-    .mf-reasons li.type-geopolitics::before{color:var(--red)}
-    .mf-reasons li.type-events::before{color:var(--gold)}
+    .mf-head-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+    .mf-head-title{font-size:12px;font-weight:600;color:var(--text1);letter-spacing:0.4px;text-transform:uppercase}
+    .mf-head-hint{font-size:10px;color:var(--text2);margin-left:auto;font-family:var(--mono)}
+    .session-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
+    .session-card{padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.02);display:flex;flex-direction:column;gap:6px}
+    .session-card.bullish{border-color:rgba(34,197,94,0.35);background:rgba(34,197,94,0.05)}
+    .session-card.bearish{border-color:rgba(239,68,68,0.35);background:rgba(239,68,68,0.05)}
+    .sc-head{display:flex;align-items:center;gap:8px}
+    .sc-icon{font-size:16px}
+    .sc-name{font-size:12px;font-weight:600;color:var(--text1);flex:1}
+    .sc-conf{font-size:10px;padding:1px 6px;border-radius:8px;background:rgba(255,255,255,0.08);color:var(--text2);font-family:var(--mono)}
+    .sc-open{font-size:10px;color:var(--text2);font-family:var(--mono)}
+    .sc-dir{display:flex;align-items:center;gap:6px;padding:4px 0}
+    .sc-dir-emoji{font-size:18px}
+    .sc-dir-label{font-size:12px;font-weight:600}
+    .sc-card.bullish .sc-dir-label,.session-card.bullish .sc-dir-label{color:var(--green)}
+    .sc-card.bearish .sc-dir-label,.session-card.bearish .sc-dir-label{color:var(--red)}
+    .sc-reasons{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:3px}
+    .sc-reasons li{font-size:10px;color:var(--text2);padding-left:10px;position:relative;line-height:1.35}
+    .sc-reasons li::before{content:'•';position:absolute;left:0;color:var(--gold)}
+    .sc-reasons li.type-technical::before{color:var(--blue)}
+    .sc-reasons li.type-geopolitics::before{color:var(--red)}
+    .sc-reasons li.type-events::before{color:var(--gold)}
+    .sc-reasons li.sub{margin-left:10px;font-size:9px;color:var(--text3)}
     .market-banner.bullish{border-color:rgba(34,197,94,0.4);background:linear-gradient(90deg,rgba(34,197,94,0.08),rgba(212,168,67,0.06))}
     .market-banner.bearish{border-color:rgba(239,68,68,0.45);background:linear-gradient(90deg,rgba(239,68,68,0.12),rgba(212,168,67,0.06))}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
@@ -273,12 +287,11 @@
           </div>
         </div>
         <div id="marketForecast" class="market-forecast" style="display:none">
-          <div class="mf-head">
-            <span id="mfEmoji" class="mf-emoji">↔️</span>
-            <span id="mfLabel" class="mf-label">Yön belirsiz</span>
-            <span id="mfConfidence" class="mf-confidence">–</span>
+          <div class="mf-head-row">
+            <span class="mf-head-title">Session Outlook</span>
+            <span class="mf-head-hint">XAU/USD · 4 forex seansı</span>
           </div>
-          <ul id="mfReasons" class="mf-reasons"></ul>
+          <div id="sessionGrid" class="session-grid"></div>
         </div>
       </div>
 
@@ -834,42 +847,68 @@
       if (sub) sub.textContent = `XAU/USD opens ${localStr} (local) — in ${hrs}h ${mins}m`;
     }
 
+    function _esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
     async function loadWeekendForecast() {
       try {
         const res = await fetch(`${API_BASE}/api/weekend_forecast`);
         const f = await res.json();
         const banner = document.getElementById('marketBanner');
         const box = document.getElementById('marketForecast');
-        if (!banner || !box) return;
-        if (!f.market_closed) {
+        const grid = document.getElementById('sessionGrid');
+        if (!banner || !box || !grid) return;
+
+        if (!f.market_closed || !Array.isArray(f.sessions) || f.sessions.length === 0) {
           box.style.display = 'none';
           banner.classList.remove('bullish','bearish');
           return;
         }
+
         box.style.display = 'block';
+
+        // Banner tint = en yakın (ilk) seansın yönüne göre
         banner.classList.remove('bullish','bearish');
-        if (f.direction === 'bullish' || f.direction === 'lean_bullish') banner.classList.add('bullish');
-        else if (f.direction === 'bearish' || f.direction === 'lean_bearish') banner.classList.add('bearish');
-        document.getElementById('mfEmoji').textContent = f.emoji || '↔️';
-        document.getElementById('mfLabel').textContent = f.label || 'Yön belirsiz';
-        document.getElementById('mfConfidence').textContent = `Güven: ${f.confidence}%`;
-        const ul = document.getElementById('mfReasons');
-        ul.innerHTML = '';
-        (f.reasons || []).forEach(r => {
-          const li = document.createElement('li');
-          li.className = 'type-' + (r.type || 'general');
-          li.textContent = r.text;
-          ul.appendChild(li);
-          if (r.items) {
-            r.items.forEach(it => {
-              const sub = document.createElement('li');
-              sub.className = 'type-events';
-              sub.style.marginLeft = '14px';
-              sub.style.fontSize = '10px';
-              sub.textContent = `↳ ${it.title}${it.time_label ? ' · ' + it.time_label : ''}`;
-              ul.appendChild(sub);
-            });
-          }
+        const first = f.sessions[0];
+        if (first.direction === 'bullish' || first.direction === 'lean_bullish') banner.classList.add('bullish');
+        else if (first.direction === 'bearish' || first.direction === 'lean_bearish') banner.classList.add('bearish');
+
+        grid.innerHTML = '';
+        f.sessions.forEach(s => {
+          const openLocal = s.opens_utc ? new Date(s.opens_utc).toLocaleString('en-GB', {
+            weekday: 'short', day: '2-digit', month: 'short',
+            hour: '2-digit', minute: '2-digit', hour12: false,
+          }) : '';
+          const card = document.createElement('div');
+          let cls = 'session-card';
+          if (s.direction === 'bullish' || s.direction === 'lean_bullish') cls += ' bullish';
+          else if (s.direction === 'bearish' || s.direction === 'lean_bearish') cls += ' bearish';
+          card.className = cls;
+
+          const reasonsHtml = (s.reasons || []).map(r => {
+            const main = `<li class="type-${_esc(r.type || 'general')}">${_esc(r.text)}</li>`;
+            const subs = (r.items || []).map(it =>
+              `<li class="type-events sub">↳ ${_esc(it.title)}${it.time_label ? ' · ' + _esc(it.time_label) : ''}</li>`
+            ).join('');
+            return main + subs;
+          }).join('');
+
+          card.innerHTML = `
+            <div class="sc-head">
+              <span class="sc-icon">${_esc(s.icon || '🕒')}</span>
+              <span class="sc-name">${_esc(s.name)}</span>
+              <span class="sc-conf">${_esc(s.confidence)}%</span>
+            </div>
+            <div class="sc-open">Opens ${_esc(openLocal)} (local)</div>
+            <div class="sc-dir">
+              <span class="sc-dir-emoji">${_esc(s.emoji || '↔️')}</span>
+              <span class="sc-dir-label">${_esc(s.label || 'Yön belirsiz')}</span>
+            </div>
+            <ul class="sc-reasons">${reasonsHtml}</ul>
+          `;
+          grid.appendChild(card);
         });
       } catch (e) {
         console.warn('weekend_forecast fetch failed', e);

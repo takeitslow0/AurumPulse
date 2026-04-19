@@ -4558,15 +4558,67 @@ def telegram_debug():
     })
 
 
+# Forex seansları (UTC). offset = sonraki market open'dan saat farkı; duration = seans uzunluğu.
+FX_SESSIONS = [
+    {'key': 'sydney',  'name': 'Sydney',            'icon': '🇦🇺', 'offset': 0,  'duration': 2},
+    {'key': 'tokyo',   'name': 'Tokyo / Singapore', 'icon': '🇯🇵', 'offset': 2,  'duration': 8},
+    {'key': 'london',  'name': 'London',            'icon': '🇬🇧', 'offset': 10, 'duration': 5},
+    {'key': 'ny',      'name': 'New York',          'icon': '🇺🇸', 'offset': 15, 'duration': 9},
+]
+
+
+def _next_market_open_utc():
+    """Sonraki XAU/USD forex açılışı (Sunday 22:00 UTC) veya şimdi piyasa açıksa None."""
+    now = datetime.now(timezone.utc)
+    dow = now.weekday()  # 0=Mon .. 6=Sun
+    hr = now.hour
+    if dow == 4 and hr >= 22:      # Cuma 22:00 sonrası
+        days = 2
+    elif dow == 5:                  # Cumartesi
+        days = 1
+    elif dow == 6 and hr < 22:      # Pazar 22'den önce
+        days = 0
+    else:
+        return None  # market açık
+    open_dt = (now + timedelta(days=days)).replace(hour=22, minute=0, second=0, microsecond=0)
+    return open_dt
+
+
+def _session_bias(session_events, tech_trend, threat_level, base_score):
+    """Session bazlı yön skoru: teknik tabanı + bu seansa denk gelen olayların yönü."""
+    score = base_score
+    bullish_evs = []
+    bearish_evs = []
+    for ev in session_events:
+        d = ev.get('gold_direction', '')
+        if 'YÜKSEL' in d:
+            bullish_evs.append(ev)
+            score += 1
+        elif 'DÜŞ' in d:
+            bearish_evs.append(ev)
+            score -= 1
+    return score, bullish_evs, bearish_evs
+
+
+def _direction_from_score(score):
+    if score >= 3: return 'bullish', 'Yükseliş bekleniyor', '📈'
+    if score >= 1: return 'lean_bullish', 'Hafif yükseliş eğilimi', '↗️'
+    if score <= -3: return 'bearish', 'Düşüş bekleniyor', '📉'
+    if score <= -1: return 'lean_bearish', 'Hafif düşüş eğilimi', '↘️'
+    return 'neutral', 'Yön belirsiz', '↔️'
+
+
 @app.route('/api/weekend_forecast')
 def api_weekend_forecast():
-    """Hafta sonu / piyasa kapalıyken açılışta beklenen yönü tahmin et.
-    Girdiler: teknik trend (son cache), jeopolitik tehdit, yaklaşan olaylar."""
+    """Hafta sonu / piyasa kapalıyken 4 forex seansı için ayrı açılış tahmini.
+    Her seans: Sydney → Tokyo → London → NY.
+    Ortak girdi: teknik trend + jeopolitik tehdit.
+    Seans-özel girdi: o saat diliminde düşen yüksek etkili olaylar."""
     try:
         can_trade, status_msg = _can_open_trade()
 
-        # 1) Son teknik snapshot (cache)
-        tech = {'trend': 'nötr', 'rsi': 50, 'signal': '', 'price': 0, 'macd_hist': 0}
+        # 1) Teknik snapshot (ortak taban)
+        tech = {'trend': 'nötr', 'rsi': 50, 'signal': '', 'price': 0, 'macd_hist': 0, 'pattern': ''}
         cached = _market_data_cache.get('1min')
         if cached and cached.get('payload'):
             p = cached['payload']
@@ -4580,7 +4632,7 @@ def api_weekend_forecast():
                 'pattern': ts.get('pattern', ''),
             }
 
-        # 2) Jeopolitik (safe-haven): yüksek tehdit = altın bullish
+        # 2) Jeopolitik (ortak taban)
         geo = get_cached_geopolitics() or {}
         threat = geo.get('threat_level', 'LOW')
         threat_emoji = geo.get('threat_emoji', '')
@@ -4589,93 +4641,113 @@ def api_weekend_forecast():
         if geo.get('geo_articles'):
             top_headline = geo['geo_articles'][0].get('title', '')[:120]
 
-        # 3) Yaklaşan high-impact olaylar
-        events = get_upcoming_events() or []
-        bullish_events = []
-        bearish_events = []
-        for ev in events[:15]:
-            if ev.get('status') == 'GEÇTİ':
-                continue
-            if ev.get('impact') != 'High':
-                continue
-            d = ev.get('gold_direction', '')
-            item = {
-                'title': ev.get('title', ''),
-                'time_label': ev.get('time_label', ''),
-                'direction': d,
-                'reason': ev.get('gold_reason', ''),
-            }
-            if 'YÜKSEL' in d:
-                bullish_events.append(item)
-            elif 'DÜŞ' in d:
-                bearish_events.append(item)
-
-        # 4) Composite bias
-        score = 0
-        reasons = []
-
+        # 3) Ortak taban skor
+        base_score = 0
+        common_reasons = []
         if tech['trend'] == 'bullish':
-            score += 2
-            reasons.append({'type': 'technical',
-                            'text': f"Teknik trend yükseliş yönlü (RSI {tech['rsi']:.0f}, MACD hist {tech['macd_hist']:+.3f})"})
+            base_score += 2
+            common_reasons.append({'type': 'technical',
+                'text': f"Teknik trend yükseliş (RSI {tech['rsi']:.0f}, MACD hist {tech['macd_hist']:+.3f})"})
         elif tech['trend'] == 'bearish':
-            score -= 2
-            reasons.append({'type': 'technical',
-                            'text': f"Teknik trend düşüş yönlü (RSI {tech['rsi']:.0f}, MACD hist {tech['macd_hist']:+.3f})"})
+            base_score -= 2
+            common_reasons.append({'type': 'technical',
+                'text': f"Teknik trend düşüş (RSI {tech['rsi']:.0f}, MACD hist {tech['macd_hist']:+.3f})"})
         else:
-            reasons.append({'type': 'technical',
-                            'text': f"Teknik nötr (RSI {tech['rsi']:.0f})"})
+            common_reasons.append({'type': 'technical',
+                'text': f"Teknik nötr (RSI {tech['rsi']:.0f})"})
 
         if threat in ('HIGH', 'CRITICAL', 'EXTREME'):
-            score += 3
-            reasons.append({'type': 'geopolitics',
-                            'text': f"Jeopolitik tehdit {threat} — safe-haven altın alımı beklenir" +
-                                    (f" • {top_headline}" if top_headline else '')})
+            base_score += 3
+            common_reasons.append({'type': 'geopolitics',
+                'text': f"Jeopolitik tehdit {threat} — safe-haven altın alımı" + (f" • {top_headline}" if top_headline else '')})
         elif threat == 'ELEVATED':
-            score += 1
-            reasons.append({'type': 'geopolitics',
-                            'text': f"Jeopolitik tehdit artışta ({threat_emoji} {threat})"})
+            base_score += 1
+            common_reasons.append({'type': 'geopolitics',
+                'text': f"Jeopolitik tehdit artışta ({threat_emoji} {threat})"})
 
-        net_events = len(bullish_events) - len(bearish_events)
-        score += net_events
-        if bullish_events:
-            reasons.append({'type': 'events',
-                            'text': f"{len(bullish_events)} yaklaşan olay altın lehine",
-                            'items': bullish_events[:3]})
-        if bearish_events:
-            reasons.append({'type': 'events',
-                            'text': f"{len(bearish_events)} yaklaşan olay altın aleyhine",
-                            'items': bearish_events[:3]})
+        # 4) Tüm upcoming events — UTC datetime'lı
+        events = get_upcoming_events() or []
 
-        # 5) Karar
-        if score >= 3:
-            direction, label, emoji = 'bullish', 'Yükseliş bekleniyor', '📈'
-        elif score <= -3:
-            direction, label, emoji = 'bearish', 'Düşüş bekleniyor', '📉'
-        elif score >= 1:
-            direction, label, emoji = 'lean_bullish', 'Hafif yükseliş eğilimi', '↗️'
-        elif score <= -1:
-            direction, label, emoji = 'lean_bearish', 'Hafif düşüş eğilimi', '↘️'
-        else:
-            direction, label, emoji = 'neutral', 'Yön belirsiz', '↔️'
+        # 5) Sonraki market open (yoksa piyasa açık)
+        base_open = _next_market_open_utc()
 
-        confidence = min(abs(score) * 15, 85)
+        # 6) Her session için ayrı tahmin
+        sessions_out = []
+        if base_open is not None:
+            for s in FX_SESSIONS:
+                open_dt = base_open + timedelta(hours=s['offset'])
+                end_dt = base_open + timedelta(hours=s['offset'] + s['duration'])
+                # Bu session'a denk düşen high-impact olaylar
+                session_events = []
+                for ev in events:
+                    if ev.get('impact') != 'High':
+                        continue
+                    if ev.get('status') == 'GEÇTİ':
+                        continue
+                    ev_time = ev.get('time')
+                    if ev_time is None:
+                        continue
+                    try:
+                        # pd.Timestamp -> datetime UTC
+                        if hasattr(ev_time, 'to_pydatetime'):
+                            ev_dt = ev_time.to_pydatetime()
+                        else:
+                            ev_dt = ev_time
+                        if ev_dt.tzinfo is None:
+                            ev_dt = ev_dt.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        continue
+                    if open_dt <= ev_dt < end_dt:
+                        session_events.append({
+                            'title': ev.get('title', ''),
+                            'country': ev.get('country', ''),
+                            'time_utc': ev_dt.isoformat(),
+                            'time_label': ev.get('time_label', ''),
+                            'direction': ev.get('gold_direction', ''),
+                            'reason': ev.get('gold_reason', ''),
+                        })
+
+                score, bull_evs, bear_evs = _session_bias(session_events, tech['trend'], threat, base_score)
+                direction, label, emoji = _direction_from_score(score)
+                confidence = min(abs(score) * 15, 85)
+
+                reasons = list(common_reasons)
+                if bull_evs:
+                    reasons.append({'type': 'events',
+                        'text': f"{len(bull_evs)} seans-içi olay altın lehine",
+                        'items': bull_evs[:3]})
+                if bear_evs:
+                    reasons.append({'type': 'events',
+                        'text': f"{len(bear_evs)} seans-içi olay altın aleyhine",
+                        'items': bear_evs[:3]})
+                if not session_events:
+                    reasons.append({'type': 'events',
+                        'text': 'Bu seansta yüksek etkili olay planlı değil'})
+
+                sessions_out.append({
+                    'key': s['key'],
+                    'name': s['name'],
+                    'icon': s['icon'],
+                    'opens_utc': open_dt.isoformat(),
+                    'closes_utc': end_dt.isoformat(),
+                    'direction': direction,
+                    'label': label,
+                    'emoji': emoji,
+                    'confidence': confidence,
+                    'score': score,
+                    'event_count': len(session_events),
+                    'reasons': reasons,
+                })
 
         return jsonify({
             'market_closed': not can_trade,
             'status_msg': status_msg,
-            'direction': direction,
-            'label': label,
-            'emoji': emoji,
-            'confidence': confidence,
-            'composite_score': score,
+            'sessions': sessions_out,
             'technical': tech,
             'threat_level': threat,
             'threat_emoji': threat_emoji,
             'geo_total_score': geo_score,
-            'bullish_event_count': len(bullish_events),
-            'bearish_event_count': len(bearish_events),
-            'reasons': reasons,
+            'base_score': base_score,
             'generated_at': int(time.time() * 1000),
         })
     except Exception:
