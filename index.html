@@ -49,6 +49,11 @@
     .status-pill.live{background:var(--green-dim);color:var(--green)}
     .status-pill.dead{background:var(--red-dim);color:var(--red)}
     .status-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
+    .market-banner{display:flex;align-items:center;gap:12px;padding:10px 16px;margin:8px 12px 0;background:linear-gradient(90deg,rgba(239,68,68,0.10),rgba(212,168,67,0.08));border:1px solid rgba(239,68,68,0.35);border-radius:8px;color:var(--red)}
+    .market-banner-icon{font-size:20px}
+    .market-banner-text{display:flex;flex-direction:column;gap:2px;flex:1}
+    .market-banner-title{font-size:13px;font-weight:600;color:var(--red)}
+    .market-banner-sub{font-size:11px;color:var(--text2);font-family:var(--mono)}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
     /* ═══ PANELS ═══ */
@@ -243,6 +248,15 @@
           </div>
         </div>
       </header>
+
+      <!-- Market hours banner (hidden when market is open) -->
+      <div id="marketBanner" class="market-banner" style="display:none">
+        <span class="market-banner-icon">⚠️</span>
+        <div class="market-banner-text">
+          <div class="market-banner-title">Market Closed</div>
+          <div class="market-banner-sub" id="marketBannerSub">Next open in –</div>
+        </div>
+      </div>
 
       <!-- ═══════════════════════════════════ -->
       <!-- PANEL: DASHBOARD                   -->
@@ -752,6 +766,46 @@
       } catch (e) {}
     }
 
+    // XAU/USD forex piyasası: Cuma 22:00 UTC kapanır, Pazar 22:00 UTC açılır.
+    function nextMarketOpenUTC() {
+      const now = new Date();
+      const dow = now.getUTCDay();  // 0=Sun, 5=Fri, 6=Sat
+      const hr = now.getUTCHours();
+      const next = new Date(now);
+      next.setUTCMinutes(0, 0, 0);
+      if (dow === 5 && hr >= 22) {
+        next.setUTCDate(now.getUTCDate() + 2);  // Fri -> Sun
+        next.setUTCHours(22);
+      } else if (dow === 6) {
+        next.setUTCDate(now.getUTCDate() + 1);  // Sat -> Sun
+        next.setUTCHours(22);
+      } else if (dow === 0 && hr < 22) {
+        next.setUTCHours(22);  // Sun today
+      } else {
+        return null;  // market açık
+      }
+      return next;
+    }
+
+    function updateMarketBanner(ds) {
+      const banner = document.getElementById('marketBanner');
+      if (!banner) return;
+      const closed = ds && ds.can_trade === false && /PİYASA KAPALI|Market Closed|weekend/i.test(ds.status_msg || '');
+      if (!closed) { banner.style.display = 'none'; return; }
+      banner.style.display = 'flex';
+      const openAt = nextMarketOpenUTC();
+      if (!openAt) return;
+      const localStr = openAt.toLocaleString('en-GB', {
+        weekday: 'short', day: '2-digit', month: 'short',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      const diffMs = openAt - new Date();
+      const hrs = Math.floor(diffMs / 3600000);
+      const mins = Math.floor((diffMs % 3600000) / 60000);
+      const sub = document.getElementById('marketBannerSub');
+      if (sub) sub.textContent = `XAU/USD opens ${localStr} (local) — in ${hrs}h ${mins}m`;
+    }
+
     async function loadTradeHistory() {
       try {
         const res = await fetch(`${API_BASE}/api/trade_history`);
@@ -759,6 +813,7 @@
         const s = data.stats;
         const bal = s.balance || (100 + s.total_pnl);
         const ds = data.daily_safety || {};
+        updateMarketBanner(ds);
 
         // Top bar balance
         $set('topBalance', '$' + bal.toFixed(2));
@@ -1193,6 +1248,14 @@
     setTimeout(initLoad, 1500);
     setTimeout(() => { loadEventPredictions(); loadTradeHistory(); }, 2500);
     checkTelegramStatus();
+
+    // Market banner countdown — her dakika güncelle (veri gerektirmez, sadece kalan süre)
+    setInterval(() => {
+      const banner = document.getElementById('marketBanner');
+      if (banner && banner.style.display !== 'none') {
+        updateMarketBanner({ can_trade: false, status_msg: 'PİYASA KAPALI' });
+      }
+    }, 60000);
   </script>
 </body>
 </html>
