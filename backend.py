@@ -942,14 +942,15 @@ TRADE_MGMT = {
     'equity_risk_pct': 2.0,
     'equity_high_conf_mult': 2.0,
     'high_conf_threshold': 80,
-    # v6.2: pattern cooldown (tek kanıtlanmış optimizasyon).
-    # Backtest sonuçları (30gün / son 7gün):
-    #   - HTF filter: 30g +$196 -> +$57 (net ZARAR) + 7g wipeout'u engellemiyor -> DEVRE DIŞI
-    #   - min_confidence 70: cap 72 ile birlikte etkisiz -> DEVRE DIŞI
-    #   - cooldown 9 bar (45dk): 30g'de minimal kayıp, 7g'de -$10 -> -$4.50 -> AÇIK
+    # v6.3: candlestick patterns + multi-pattern confluence — cooldown kapalı.
+    # Backtest 30g (10 pattern + confluence):
+    #   cooldown 0 -> +$547 (174 trades, WR 45%)
+    #   cooldown 6 -> +$430
+    #   cooldown 12 -> +$352
+    # Cooldown trade kalitesini artırmıyor, sadece kâr fırsatlarını kaçırıyor.
     'htf_regime_filter': False,
     'min_confidence': 0,
-    'pattern_cooldown_sec': 1800,   # 30 dk — dengeli: 30g +$85, 7g -$6 (orijinal 7g -$10)
+    'pattern_cooldown_sec': 0,
 }
 
 # Pattern bazlı son tetiklenme zamanı — cooldown için
@@ -2875,8 +2876,98 @@ def detect_pennant(df, idx, atr):
     return None
 
 
+# ═══════════════════════════════════════════
+# v6.3: CANDLESTICK PATTERNS — backtest'te kanıtlanmış 6 mum kalıbı
+# ═══════════════════════════════════════════
+
+def _candle_props_be(row):
+    """Mumun gövde / fitil özellikleri (backend.py 'open/high/low/close' küçük harf)."""
+    o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
+    body = abs(c - o)
+    full = h - l
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    return o, h, l, c, body, full, upper_wick, lower_wick
+
+
+def detect_bullish_engulfing(df, idx, atr):
+    if idx < 2:
+        return None
+    p_o, _, _, p_c, p_body, _, _, _ = _candle_props_be(df.iloc[idx - 1])
+    c_o, _, _, c_c, c_body, _, _, _ = _candle_props_be(df.iloc[idx])
+    if p_c < p_o and c_c > c_o and c_o <= p_c and c_c >= p_o and c_body >= 0.5 * atr:
+        return {'pattern': 'BULL_ENGULF', 'direction': 'LONG', 'confidence': 70, 'height': c_body * 1.5}
+    return None
+
+
+def detect_bearish_engulfing(df, idx, atr):
+    if idx < 2:
+        return None
+    p_o, _, _, p_c, p_body, _, _, _ = _candle_props_be(df.iloc[idx - 1])
+    c_o, _, _, c_c, c_body, _, _, _ = _candle_props_be(df.iloc[idx])
+    if p_c > p_o and c_c < c_o and c_o >= p_c and c_c <= p_o and c_body >= 0.5 * atr:
+        return {'pattern': 'BEAR_ENGULF', 'direction': 'SHORT', 'confidence': 70, 'height': c_body * 1.5}
+    return None
+
+
+def detect_hammer(df, idx, atr):
+    if idx < 5:
+        return None
+    o, h, l, c, body, full, up_wick, lo_wick = _candle_props_be(df.iloc[idx])
+    if full <= 0 or body <= 0:
+        return None
+    if lo_wick >= 2 * body and up_wick <= 0.3 * body and body >= 0.2 * atr:
+        prev5 = df.iloc[idx - 5:idx]
+        if float(prev5['close'].iloc[-1]) < float(prev5['close'].iloc[0]):
+            return {'pattern': 'HAMMER', 'direction': 'LONG', 'confidence': 65, 'height': lo_wick * 1.2}
+    return None
+
+
+def detect_shooting_star(df, idx, atr):
+    if idx < 5:
+        return None
+    o, h, l, c, body, full, up_wick, lo_wick = _candle_props_be(df.iloc[idx])
+    if full <= 0 or body <= 0:
+        return None
+    if up_wick >= 2 * body and lo_wick <= 0.3 * body and body >= 0.2 * atr:
+        prev5 = df.iloc[idx - 5:idx]
+        if float(prev5['close'].iloc[-1]) > float(prev5['close'].iloc[0]):
+            return {'pattern': 'SHOOTING_STAR', 'direction': 'SHORT', 'confidence': 65, 'height': up_wick * 1.2}
+    return None
+
+
+def detect_morning_star(df, idx, atr):
+    if idx < 3:
+        return None
+    c1 = df.iloc[idx - 2]; c2 = df.iloc[idx - 1]; c3 = df.iloc[idx]
+    c1_o = float(c1['open']); c1_c = float(c1['close']); c1_body = abs(c1_c - c1_o)
+    _, _, _, _, c2_body, _, _, _ = _candle_props_be(c2)
+    c3_o, _, _, c3_c, c3_body, _, _, _ = _candle_props_be(c3)
+    if (c1_c < c1_o and c1_body >= 0.8 * atr and
+        c2_body <= 0.3 * atr and
+        c3_c > c3_o and c3_body >= 0.8 * atr and
+        c3_c >= (c1_o + c1_c) / 2):
+        return {'pattern': 'MORNING_STAR', 'direction': 'LONG', 'confidence': 75, 'height': c3_body * 2}
+    return None
+
+
+def detect_evening_star(df, idx, atr):
+    if idx < 3:
+        return None
+    c1 = df.iloc[idx - 2]; c2 = df.iloc[idx - 1]; c3 = df.iloc[idx]
+    c1_o = float(c1['open']); c1_c = float(c1['close']); c1_body = abs(c1_c - c1_o)
+    _, _, _, _, c2_body, _, _, _ = _candle_props_be(c2)
+    c3_o, _, _, c3_c, c3_body, _, _, _ = _candle_props_be(c3)
+    if (c1_c > c1_o and c1_body >= 0.8 * atr and
+        c2_body <= 0.3 * atr and
+        c3_c < c3_o and c3_body >= 0.8 * atr and
+        c3_c <= (c1_o + c1_c) / 2):
+        return {'pattern': 'EVENING_STAR', 'direction': 'SHORT', 'confidence': 75, 'height': c3_body * 2}
+    return None
+
+
 def detect_patterns(df, idx, atr):
-    """Tüm kalıpları tara, en güvenilir olanı döndür — 18 pattern"""
+    """Tüm kalıpları tara, en güvenilir olanı döndür — 16 chart + 6 candlestick + confluence boost"""
     swing_highs, swing_lows = find_swings(df, idx, PATTERN_CONFIG['pattern_lookback'])
     current_price = float(df.iloc[idx]['close'])
 
@@ -2962,12 +3053,31 @@ def detect_patterns(df, idx, atr):
     if p:
         patterns_found.append(p)
 
+    # ── v6.3: Candlestick patterns ──
+    for fn in (detect_bullish_engulfing, detect_bearish_engulfing,
+               detect_hammer, detect_shooting_star,
+               detect_morning_star, detect_evening_star):
+        try:
+            p = fn(df, idx, atr)
+            if p:
+                patterns_found.append(p)
+        except Exception:
+            pass  # Candle pattern fail → atla, ana kalıbı bozma
+
     if not patterns_found:
         return None
 
-    # En yüksek güvenilirliğe sahip kalıbı seç
     best = max(patterns_found, key=lambda x: x['confidence'])
-    print(f"   🔍 Pattern bulundu: {best['pattern']} ({best['confidence']}%) — Toplam {len(patterns_found)} aday")
+
+    # v6.3: Multi-pattern confluence boost — aynı yönde 2+ pattern varsa güven artırılır
+    same_dir = sum(1 for x in patterns_found if x['direction'] == best['direction'])
+    if same_dir >= 2:
+        best = dict(best)
+        boost = min(15, (same_dir - 1) * 8)
+        best['confidence'] = min(95, best['confidence'] + boost)
+        best['confluence'] = same_dir
+
+    print(f"   🔍 Pattern: {best['pattern']} ({best['confidence']}%, conf×{best.get('confluence', 1)}) — {len(patterns_found)} aday")
     return best
 
 

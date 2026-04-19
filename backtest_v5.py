@@ -97,7 +97,7 @@ MTF_EMA_SLOW = 50
 # ═══ v6.2: MIN CONFIDENCE + PATTERN COOLDOWN ═══
 # Cooldown 9 bar (45dk) en iyi sonucu veriyor: 30g benzer, 7g wipeout -$10 -> -$4.50.
 MIN_CONFIDENCE = 0                # Etkisiz (cap 72 ile patternler zaten 70+)
-PATTERN_COOLDOWN_BARS = 6         # 5dk * 6 = 30dk cooldown
+PATTERN_COOLDOWN_BARS = 0         # v6.3: kapalı (10 pattern + confluence ile cooldown gereksiz)
 # Pattern confidence cap — backend.py ile aynı değerler
 PATTERN_CONFIDENCE_CAP = {
     'DOUBLE_BOTTOM': 72, 'DOUBLE_TOP': 68,
@@ -633,55 +633,170 @@ def check_volume_confirmation(df, idx, lookback=20):
 
 
 # ═══════════════════════════════════════════
+# v6.3: MUM (CANDLESTICK) KALIPLARI
+# Tek/iki/üç-bar reversal sinyalleri — kalıp tabanından bağımsız
+# ═══════════════════════════════════════════
+
+def _candle_props(row):
+    """Bir mumun gövde, fitil, yön özellikleri."""
+    o, h, l, c = float(row['Open']), float(row['High']), float(row['Low']), float(row['Close'])
+    body = abs(c - o)
+    full = h - l
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    return o, h, l, c, body, full, upper_wick, lower_wick
+
+
+def detect_bullish_engulfing(df, idx, atr):
+    """Boğa yutan: önceki kırmızı mum + bunu tamamen örten yeşil mum (LONG)."""
+    if idx < 2:
+        return None
+    prev = df.iloc[idx - 1]
+    cur = df.iloc[idx]
+    p_o, _, _, p_c, p_body, _, _, _ = _candle_props(prev)
+    c_o, _, _, c_c, c_body, _, _, _ = _candle_props(cur)
+    # Önceki bearish, mevcut bullish, body önceki body'yi örtüyor, body anlamlı (>= 0.5*ATR)
+    if p_c < p_o and c_c > c_o and c_o <= p_c and c_c >= p_o and c_body >= 0.5 * atr:
+        return {'pattern': 'BULL_ENGULF', 'direction': 'LONG',
+                'confidence': 70, 'height': c_body * 1.5}
+    return None
+
+
+def detect_bearish_engulfing(df, idx, atr):
+    """Ayı yutan: önceki yeşil + tamamen örten kırmızı (SHORT)."""
+    if idx < 2:
+        return None
+    prev = df.iloc[idx - 1]
+    cur = df.iloc[idx]
+    p_o, _, _, p_c, p_body, _, _, _ = _candle_props(prev)
+    c_o, _, _, c_c, c_body, _, _, _ = _candle_props(cur)
+    if p_c > p_o and c_c < c_o and c_o >= p_c and c_c <= p_o and c_body >= 0.5 * atr:
+        return {'pattern': 'BEAR_ENGULF', 'direction': 'SHORT',
+                'confidence': 70, 'height': c_body * 1.5}
+    return None
+
+
+def detect_hammer(df, idx, atr):
+    """Çekiç: küçük gövde + uzun alt fitil (LONG reversal). Düşüş trendinde dipte aranır."""
+    if idx < 5:
+        return None
+    cur = df.iloc[idx]
+    o, h, l, c, body, full, up_wick, lo_wick = _candle_props(cur)
+    if full <= 0 or body <= 0:
+        return None
+    # Alt fitil >= 2x gövde, üst fitil <= 0.3x gövde, gövde anlamlı
+    if lo_wick >= 2 * body and up_wick <= 0.3 * body and body >= 0.2 * atr:
+        # Önceki 5 bar düşüş eğiliminde mi?
+        prev5 = df.iloc[idx - 5:idx]
+        if float(prev5['Close'].iloc[-1]) < float(prev5['Close'].iloc[0]):
+            return {'pattern': 'HAMMER', 'direction': 'LONG',
+                    'confidence': 65, 'height': lo_wick * 1.2}
+    return None
+
+
+def detect_shooting_star(df, idx, atr):
+    """Vurulan yıldız: küçük gövde + uzun üst fitil (SHORT reversal). Yükseliş tepesinde."""
+    if idx < 5:
+        return None
+    cur = df.iloc[idx]
+    o, h, l, c, body, full, up_wick, lo_wick = _candle_props(cur)
+    if full <= 0 or body <= 0:
+        return None
+    if up_wick >= 2 * body and lo_wick <= 0.3 * body and body >= 0.2 * atr:
+        prev5 = df.iloc[idx - 5:idx]
+        if float(prev5['Close'].iloc[-1]) > float(prev5['Close'].iloc[0]):
+            return {'pattern': 'SHOOTING_STAR', 'direction': 'SHORT',
+                    'confidence': 65, 'height': up_wick * 1.2}
+    return None
+
+
+def detect_morning_star(df, idx, atr):
+    """Sabah yıldızı: 3-mum dip reversal — büyük kırmızı + küçük doji + büyük yeşil (LONG)."""
+    if idx < 3:
+        return None
+    c1 = df.iloc[idx - 2]
+    c2 = df.iloc[idx - 1]
+    c3 = df.iloc[idx]
+    _, _, _, c1_c, c1_body, _, _, _ = _candle_props(c1)
+    c1_o = float(c1['Open'])
+    _, _, _, _, c2_body, _, _, _ = _candle_props(c2)
+    c3_o, _, _, c3_c, c3_body, _, _, _ = _candle_props(c3)
+    # 1. mum: büyük kırmızı; 2. mum: küçük (doji-like); 3. mum: büyük yeşil, 1. yarısının üstüne kapanıyor
+    if (c1_c < c1_o and c1_body >= 0.8 * atr and
+        c2_body <= 0.3 * atr and
+        c3_c > c3_o and c3_body >= 0.8 * atr and
+        c3_c >= (c1_o + c1_c) / 2):
+        return {'pattern': 'MORNING_STAR', 'direction': 'LONG',
+                'confidence': 75, 'height': c3_body * 2}
+    return None
+
+
+def detect_evening_star(df, idx, atr):
+    """Akşam yıldızı: 3-mum tepe reversal — büyük yeşil + doji + büyük kırmızı (SHORT)."""
+    if idx < 3:
+        return None
+    c1 = df.iloc[idx - 2]
+    c2 = df.iloc[idx - 1]
+    c3 = df.iloc[idx]
+    c1_o = float(c1['Open']); c1_c = float(c1['Close'])
+    c1_body = abs(c1_c - c1_o)
+    _, _, _, _, c2_body, _, _, _ = _candle_props(c2)
+    c3_o, _, _, c3_c, c3_body, _, _, _ = _candle_props(c3)
+    if (c1_c > c1_o and c1_body >= 0.8 * atr and
+        c2_body <= 0.3 * atr and
+        c3_c < c3_o and c3_body >= 0.8 * atr and
+        c3_c <= (c1_o + c1_c) / 2):
+        return {'pattern': 'EVENING_STAR', 'direction': 'SHORT',
+                'confidence': 75, 'height': c3_body * 2}
+    return None
+
+
+# ═══════════════════════════════════════════
 # ANA KALIP TESPİT MOTORU
 # ═══════════════════════════════════════════
 def detect_patterns(df, idx, atr):
-    """Tüm kalıpları tara, en güvenilir olanı döndür"""
+    """Tüm kalıpları tara, en güvenilir olanı döndür.
+    v6.3: chart pattern'lar + candlestick pattern'lar + multi-pattern confluence bonusu."""
     swing_highs, swing_lows = find_swings(df, idx, PATTERN_LOOKBACK)
     current_price = float(df.iloc[idx]['Close'])
 
     patterns_found = []
 
-    # Double Bottom
+    # ── Chart pattern'lar (mevcut) ──
     p = detect_double_bottom(swing_lows, swing_highs, current_price, atr, idx)
-    if p:
-        patterns_found.append(p)
+    if p: patterns_found.append(p)
 
-    # Double Top (v5.7'te %15 WR, zarar — devre dışı)
-    # p = detect_double_top(swing_highs, swing_lows, current_price, atr, idx)
-    # if p:
-    #     patterns_found.append(p)
-
-    # Head & Shoulders
     p = detect_head_shoulders(swing_highs, swing_lows, current_price, atr, idx)
-    if p:
-        patterns_found.append(p)
+    if p: patterns_found.append(p)
 
-    # Inverse Head & Shoulders
     p = detect_inv_head_shoulders(swing_lows, swing_highs, current_price, atr, idx)
-    if p:
-        patterns_found.append(p)
+    if p: patterns_found.append(p)
 
-    # Bull/Bear Flag
     p = detect_flag(df, idx, atr)
-    if p:
-        patterns_found.append(p)
+    if p: patterns_found.append(p)
 
-    # Ascending Triangle (v5.2'de test edildi, düşük WR — devre dışı)
-    # p = detect_ascending_triangle(swing_highs, swing_lows, current_price, atr, idx)
-    # if p:
-    #     patterns_found.append(p)
-
-    # Descending Triangle (v5.2'de test edildi, düşük WR — devre dışı)
-    # p = detect_descending_triangle(swing_highs, swing_lows, current_price, atr, idx)
-    # if p:
-    #     patterns_found.append(p)
+    # ── v6.3: Candlestick pattern'lar ──
+    for fn in (detect_bullish_engulfing, detect_bearish_engulfing,
+               detect_hammer, detect_shooting_star,
+               detect_morning_star, detect_evening_star):
+        p = fn(df, idx, atr)
+        if p: patterns_found.append(p)
 
     if not patterns_found:
         return None
 
-    # En yüksek güvenilirliğe sahip kalıbı seç
-    return max(patterns_found, key=lambda x: x['confidence'])
+    # v6.3: Multi-pattern confluence — aynı yönde 2+ pattern varsa confidence boost
+    long_count = sum(1 for x in patterns_found if x['direction'] == 'LONG')
+    short_count = sum(1 for x in patterns_found if x['direction'] == 'SHORT')
+    best = max(patterns_found, key=lambda x: x['confidence'])
+    same_dir_count = long_count if best['direction'] == 'LONG' else short_count
+    if same_dir_count >= 2:
+        best = dict(best)  # mutate copy, asıl listeye dokunma
+        boost = min(15, (same_dir_count - 1) * 8)
+        best['confidence'] = min(95, best['confidence'] + boost)
+        best['confluence'] = same_dir_count
+
+    return best
 
 
 # ═══════════════════════════════════════════
