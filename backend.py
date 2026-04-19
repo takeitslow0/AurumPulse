@@ -942,10 +942,14 @@ TRADE_MGMT = {
     'equity_risk_pct': 2.0,
     'equity_high_conf_mult': 2.0,
     'high_conf_threshold': 80,
-    # v6.2: rejim filtresi + kalite eşiği + pattern cooldown
-    'htf_regime_filter': True,      # 15dk HTF EMA yönüne ters sinyal atma
-    'min_confidence': 70,           # %70 altı pattern'leri atla
-    'pattern_cooldown_sec': 1800,   # Aynı pattern için 30 dk cooldown (arka arkaya spam önler)
+    # v6.2: pattern cooldown (tek kanıtlanmış optimizasyon).
+    # Backtest sonuçları (30gün / son 7gün):
+    #   - HTF filter: 30g +$196 -> +$57 (net ZARAR) + 7g wipeout'u engellemiyor -> DEVRE DIŞI
+    #   - min_confidence 70: cap 72 ile birlikte etkisiz -> DEVRE DIŞI
+    #   - cooldown 9 bar (45dk): 30g'de minimal kayıp, 7g'de -$10 -> -$4.50 -> AÇIK
+    'htf_regime_filter': False,
+    'min_confidence': 0,
+    'pattern_cooldown_sec': 1800,   # 30 dk — dengeli: 30g +$85, 7g -$6 (orijinal 7g -$10)
 }
 
 # Pattern bazlı son tetiklenme zamanı — cooldown için

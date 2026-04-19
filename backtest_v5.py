@@ -87,13 +87,24 @@ DYNAMIC_TP_MULTIPLIER = 1.5        # pattern_height * multiplier * lot * contrac
 # ═══ EMA TREND FILTER (#6) ═══
 EMA_FILTER_ENABLED = True          # LONG sadece bullish EMA'da, SHORT sadece bearish'te
 
-# ═══ MULTI-TIMEFRAME TEYİDİ ═══
+# ═══ MULTI-TIMEFRAME TEYİDİ ═══ (v6.2: test sonrası KAPATILDI)
+# Backtest: 30g WR %51 -> %38, net $1965 -> $575. Kâr azaltıyor, son hafta wipeout'u fix etmiyor.
 MTF_ENABLED = False
-MTF_RESAMPLE = '1h'               # 5dk veriyi 1 saate resample et
-MTF_EMA_FAST = 20                  # 1h EMA hızlı
-MTF_EMA_SLOW = 50                  # 1h EMA yavaş
-# LONG → 1h EMA20 > EMA50 (büyük trend yukarı)
-# SHORT → 1h EMA20 < EMA50 (büyük trend aşağı)
+MTF_RESAMPLE = '1h'
+MTF_EMA_FAST = 20
+MTF_EMA_SLOW = 50
+
+# ═══ v6.2: MIN CONFIDENCE + PATTERN COOLDOWN ═══
+# Cooldown 9 bar (45dk) en iyi sonucu veriyor: 30g benzer, 7g wipeout -$10 -> -$4.50.
+MIN_CONFIDENCE = 0                # Etkisiz (cap 72 ile patternler zaten 70+)
+PATTERN_COOLDOWN_BARS = 6         # 5dk * 6 = 30dk cooldown
+# Pattern confidence cap — backend.py ile aynı değerler
+PATTERN_CONFIDENCE_CAP = {
+    'DOUBLE_BOTTOM': 72, 'DOUBLE_TOP': 68,
+    'HEAD_SHOULDERS': 75, 'INV_HEAD_SHOULDERS': 75,
+    'BULL_FLAG': 65, 'BEAR_FLAG': 65,
+    'ASCENDING_TRIANGLE': 65, 'DESCENDING_TRIANGLE': 65,
+}
 
 # ═══ SPREAD & SLIPPAGE SİMÜLASYONU ═══
 SPREAD_SLIPPAGE_ENABLED = True
@@ -951,6 +962,25 @@ for i in range(start_idx, len(df)):
         equity_curve.append(balance)
         continue
 
+    # v6.2: Pattern confidence cap (re-kalibrasyon)
+    cap = PATTERN_CONFIDENCE_CAP.get(pattern['pattern'])
+    if cap is not None and pattern['confidence'] > cap:
+        pattern['confidence'] = cap
+
+    # v6.2: Minimum confidence eşiği
+    if pattern['confidence'] < MIN_CONFIDENCE:
+        filtered_no_pattern += 1
+        equity_curve.append(balance)
+        continue
+
+    # v6.2: Pattern cooldown — aynı pattern son N bar içinde tetiklendiyse atla
+    _last_bar_for_pattern = globals().setdefault('_last_bar_for_pattern', {})
+    last_bar = _last_bar_for_pattern.get(pattern['pattern'], -10000)
+    if i - last_bar < PATTERN_COOLDOWN_BARS:
+        filtered_no_pattern += 1
+        equity_curve.append(balance)
+        continue
+
     # ── EMA TREND TEYİDİ (#6) ──
     ema20 = float(row['EMA20'])
     ema50 = float(row['EMA50'])
@@ -1042,6 +1072,8 @@ for i in range(start_idx, len(df)):
         tp_price = tp
         entry_bar = i
         entry_pattern = pattern['pattern']
+        # v6.2: Pattern cooldown kaydı
+        _last_bar_for_pattern[pattern['pattern']] = i
         entry_lot = trade_lot
         entry_remaining_lot = trade_lot  # Partial TP sonrası kalan lot
         entry_partial_done = False       # Partial TP yapıldı mı
