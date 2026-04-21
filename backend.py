@@ -908,12 +908,14 @@ def _record_trade(pos, exit_price, result_type, pnl):
 # ─────────────────────────────────────────
 ACCOUNT_CONFIG = {
     'balance': 100.0,        # Hesap bakiyesi ($)
-    'risk_pct': 2.0,         # v3.6 orijinal
-    'max_risk_pct': 5.0,     # v3.6 orijinal
+    'risk_pct': 2.0,         # Tradestrat başına hedef risk %
+    'max_risk_pct': 5.0,     # Auto-lot tek trade'de %5'i geçemez
     'contract_size': 100,    # 1 lot = 100 ons (XAU/USD standart)
     'min_lot': 0.01,         # Minimum lot büyüklüğü
-    'max_lot': 5.0,          # Auto lot — $300 hedef için yüksek lot gerekebilir
-    'leverage': 100,         # Kaldıraç oranı
+    # v6.5: max_lot 5.0 -> 0.05. $100 bakiyede 5.0 lot absürt —
+    # tek SL'de -$44 kaybına sebep oldu. 0.05 lot = $50 altın hareketinde -$5.
+    'max_lot': 0.05,
+    'leverage': 100,
 }
 
 # DB'den trade geçmişini yükle ve bakiyeyi güncelle
@@ -4118,8 +4120,11 @@ def build_response_payload(interval='1min'):
                                 f"{confidence}%", quality_score, quality_reasons, _temp_risk, analysis
                             )
 
-                # ── PATTERN BULUNAMADIYSA → COMPOSITE + BASİT FALLBACK ──
-                if not pattern_signal:
+                # v6.5: Composite fallback KAPATILDI.
+                # Canlı test sonucu: 4 trade'den 3'ü composite, hepsi kayıp (-$74 toplam).
+                # Tek kazanç pattern-based'ti (DOUBLE_TOP +$26.88). Pattern yoksa beklemek
+                # composite açmaktan iyi.
+                if False and not pattern_signal:
                     print(f"   📊 Pattern yok → Composite/BASİT fallback deneniyor...")
                     trend, sig_type, sl, tp1, tp2, confidence, analysis = generate_composite_signal(
                         gold_df, mas, current_price, atr_val,
