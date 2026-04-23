@@ -105,6 +105,95 @@ def reset_balance():
     print("🔄 Simülasyon sıfırlandı — Bakiye: $100.00")
     return jsonify({"status": "ok", "balance": 100.0, "message": "Simülasyon sıfırlandı"})
 
+
+@app.route('/api/admin/restore_state', methods=['POST'])
+@require_api_key
+def restore_state():
+    """Eski state'i geri yükle (deploy sonrası DB sıfırlanırsa).
+    Payload:
+      {
+        "balance": 1223.57,            # hedef bakiye
+        "positions": [                  # açık pozisyonlar (opsiyonel)
+          {"trend": "bearish", "pattern": "SYM_TRIANGLE_BEAR",
+           "entry": 4701.5, "sl": 4705.49, "tp1": 4662.65, "tp2": 4643.23,
+           "lot": 0.07, "open_time": 1745516400, "tp1_hit": false,
+           "remaining_lot": 0.07, "partial_done": false,
+           "trailing_sl": 4705.49, "dynamic_tp_dollars": 20.0}
+        ]
+      }
+    Mevcut state'i temizler, verilen bakiye ve pozisyonları yükler.
+    """
+    global _active_positions, _trade_history
+    try:
+        data = request.get_json(silent=True) or {}
+        balance = float(data.get('balance', 100.0))
+        positions = data.get('positions', []) or []
+
+        # Sentetik "RESTORE" trade ile bakiyeyi yeniden kur (balance = 100 + sum(pnls))
+        pnl_delta = round(balance - 100.0, 2)
+        restore_trade = {
+            'open_time': int(time.time()) - 1,
+            'close_time': int(time.time()),
+            'trend': 'bullish' if pnl_delta >= 0 else 'bearish',
+            'entry': 0.0, 'exit_price': 0.0,
+            'sl': 0.0, 'tp1': 0.0, 'tp2': 0.0,
+            'result': 'RESTORE',
+            'pnl': pnl_delta,
+            'tp1_hit': False,
+            'pattern': 'STATE_RESTORE',
+            'lot': 0.0,
+        }
+
+        with _state_lock:
+            _active_positions = []
+            _trade_history = [restore_trade] if pnl_delta != 0 else []
+            ACCOUNT_CONFIG['balance'] = balance
+            _daily_state['trades_today'] = 0
+            _daily_state['pnl_today'] = 0
+            _daily_state['consecutive_losses'] = 0
+            _daily_state['paused_until'] = 0
+            _daily_state['pause_reason'] = ''
+
+            # Pozisyonları doğrula & yükle (default'larla doldur)
+            for p in positions:
+                pos = {
+                    'trend': p.get('trend', 'bullish'),
+                    'pattern': p.get('pattern', 'UNKNOWN'),
+                    'entry': float(p.get('entry', 0)),
+                    'sl': float(p.get('sl', 0)),
+                    'tp1': float(p.get('tp1', 0)),
+                    'tp2': float(p.get('tp2', 0)),
+                    'lot': float(p.get('lot', 0.01)),
+                    'open_time': int(p.get('open_time', time.time())),
+                    'tp1_hit': bool(p.get('tp1_hit', False)),
+                    'remaining_lot': float(p.get('remaining_lot', p.get('lot', 0.01))),
+                    'partial_done': bool(p.get('partial_done', False)),
+                    'trailing_sl': float(p.get('trailing_sl', p.get('sl', 0))),
+                    'dynamic_tp_dollars': float(p.get('dynamic_tp_dollars', 20.0)),
+                    'signal': p.get('signal', ''),
+                }
+                _active_positions.append(pos)
+
+        # DB'ye yaz
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(_BASE_DIR, 'aurumpulse.db'))
+        conn.execute('DELETE FROM trade_history')
+        conn.execute('DELETE FROM active_positions')
+        if pnl_delta != 0:
+            conn.execute('''INSERT INTO trade_history (open_time, close_time, trend, entry, exit_price, sl, tp1, tp2, result, pnl, tp1_hit, pattern, lot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (restore_trade['open_time'], restore_trade['close_time'], restore_trade['trend'],
+                 0, 0, 0, 0, 0, 'RESTORE', pnl_delta, 0, 'STATE_RESTORE', 0))
+        conn.commit()
+        conn.close()
+        _persist_positions()
+
+        logger.info("State restored: balance=$%s, positions=%d", balance, len(_active_positions))
+        return jsonify({"status": "ok", "balance": balance,
+                        "positions_loaded": len(_active_positions)})
+    except Exception as e:
+        logger.exception("restore_state hatası")
+        return jsonify({"error": str(e)}), 500
+
 # ─────────────────────────────────────────
 # TELEGRAM BOT AYARLARI
 # ─────────────────────────────────────────
