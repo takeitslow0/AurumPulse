@@ -567,7 +567,15 @@ def _get_daily_pnl():
 
 def _calculate_auto_lot(sl_distance):
     """$300 günlük hedefe göre otomatik lot hesapla.
-    Kalan hedefe ulaşmak için gereken lot büyüklüğünü belirler."""
+    v6.6: max lot DINAMIK — bakiye büyüdükçe doğal olarak büyür.
+
+    Formül: max_lot = balance × 0.0005
+      $100  →  0.05 lot (~$47 notional risk, 100:1 kaldıraçla güvenli)
+      $500  →  0.25 lot
+      $1000 →  0.50 lot
+      $5000 →  2.50 lot
+    Bu gerçek broker 100:1 kaldıraç margin'ine uyumlu — sim ile canlı açığı kapar.
+    """
     daily = _get_daily_pnl()
     remaining = max(DAILY_TARGET - daily['realized'], 50)  # En az $50 hedef
     contract = ACCOUNT_CONFIG['contract_size']  # 100 oz
@@ -577,12 +585,14 @@ def _calculate_auto_lot(sl_distance):
 
     # Hedef: 1 trade'de kalan hedefin %30-50'sini kapatacak lot
     target_per_trade = remaining * 0.35
-    # TP genelde SL'nin 2-3 katı, ortalama 2.5x diyelim
     expected_tp = sl_distance * 2.5
-    # lot = hedef_kar / (tp_mesafesi * contract_size)
     raw_lot = target_per_trade / (expected_tp * contract)
 
-    lot = round(max(min(raw_lot, 5.0), 0.01), 2)
+    # Dynamic max_lot = balance × 0.0005, tabanda 0.01, tavanda 5.0
+    balance = ACCOUNT_CONFIG.get('balance', 100.0)
+    dynamic_max = max(0.01, min(5.0, balance * 0.0005))
+
+    lot = round(max(min(raw_lot, dynamic_max), 0.01), 2)
     return lot
 
 def _get_positions_snapshot(current_price):
@@ -912,8 +922,9 @@ ACCOUNT_CONFIG = {
     'max_risk_pct': 5.0,     # Auto-lot tek trade'de %5'i geçemez
     'contract_size': 100,    # 1 lot = 100 ons (XAU/USD standart)
     'min_lot': 0.01,         # Minimum lot büyüklüğü
-    # v6.5: max_lot 5.0 -> 0.05. $100 bakiyede 5.0 lot absürt —
-    # tek SL'de -$44 kaybına sebep oldu. 0.05 lot = $50 altın hareketinde -$5.
+    # v6.6: max_lot artık DINAMIK olarak balance × 0.0005 formülüyle hesaplanır
+    # (_calculate_auto_lot ve generate_pattern_signal içinde). Bu değer sadece
+    # fallback/legacy yollar için tutuluyor.
     'max_lot': 0.05,
     'leverage': 100,
 }
@@ -3197,7 +3208,9 @@ def generate_pattern_signal(current_price, atr_val, balance):
         if confidence >= TRADE_MGMT['high_conf_threshold']:
             risk_amount *= TRADE_MGMT['equity_high_conf_mult']
         raw_lot = risk_amount / (sl_distance * ACCOUNT_CONFIG['contract_size'])
-        lot = round(max(min(raw_lot, ACCOUNT_CONFIG['max_lot']), ACCOUNT_CONFIG['min_lot']), 2)
+        # v6.6: Dynamic max_lot — bakiye × 0.0005 (broker 100:1 margin uyumlu)
+        dynamic_max = max(0.01, min(5.0, balance * 0.0005))
+        lot = round(max(min(raw_lot, dynamic_max), ACCOUNT_CONFIG['min_lot']), 2)
     else:
         lot = ACCOUNT_CONFIG['min_lot']
 
