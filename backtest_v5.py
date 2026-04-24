@@ -182,6 +182,27 @@ def calculate_indicators(df):
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
+    # v6.7: Bollinger Bands (20, 2σ)
+    bb_ma = close.rolling(20).mean()
+    bb_sd = close.rolling(20).std()
+    df['BB_MID'] = bb_ma
+    df['BB_UP'] = bb_ma + 2 * bb_sd
+    df['BB_DN'] = bb_ma - 2 * bb_sd
+    df['BB_WIDTH'] = (df['BB_UP'] - df['BB_DN']) / bb_ma
+
+    # v6.7: VWAP (rolling 20-bar — session-gün hesabı backtest için overkill)
+    if 'Volume' in df.columns:
+        vol = df['Volume'].replace(0, 1)  # 0 hacim = 1 (div-by-zero önle)
+        typical = (df['High'] + df['Low'] + df['Close']) / 3
+        tpv = typical * vol
+        df['VWAP'] = tpv.rolling(20).sum() / vol.rolling(20).sum()
+    else:
+        df['VWAP'] = close
+
+    # v6.7: Volume avg (hacim spike tespiti için)
+    if 'Volume' in df.columns:
+        df['VOL_AVG20'] = df['Volume'].rolling(20).mean()
+
     return df
 
 
@@ -791,10 +812,56 @@ def detect_patterns(df, idx, atr):
     best = max(patterns_found, key=lambda x: x['confidence'])
     same_dir_count = long_count if best['direction'] == 'LONG' else short_count
     if same_dir_count >= 2:
-        best = dict(best)  # mutate copy, asıl listeye dokunma
+        best = dict(best)
         boost = min(15, (same_dir_count - 1) * 8)
         best['confidence'] = min(95, best['confidence'] + boost)
         best['confluence'] = same_dir_count
+
+    # v6.7: Quality boost — volume spike, VWAP alignment, BB pozisyonu
+    try:
+        row = df.iloc[idx]
+        boost_reasons = []
+
+        # 1) Volume spike: son bar hacmi 20-bar ort > 1.5x
+        if 'VOL_AVG20' in df.columns and 'Volume' in df.columns:
+            v = float(row.get('Volume', 0))
+            v_avg = float(row.get('VOL_AVG20', 0))
+            if v_avg > 0 and v >= 1.5 * v_avg:
+                boost_reasons.append(('vol_spike', 8))
+
+        # 2) VWAP alignment: LONG için fiyat VWAP üstünde, SHORT için altında (sadece pozitif)
+        if 'VWAP' in df.columns:
+            vwap = float(row.get('VWAP', 0))
+            close_px = float(row['Close'])
+            if vwap > 0:
+                aligned = (best['direction'] == 'LONG' and close_px > vwap) or \
+                          (best['direction'] == 'SHORT' and close_px < vwap)
+                if aligned:
+                    boost_reasons.append(('vwap_align', 5))
+
+        # 3) Bollinger breakout: bandın dışına çıkma → momentum teyidi
+        if 'BB_UP' in df.columns and 'BB_DN' in df.columns:
+            bb_up = float(row.get('BB_UP', 0))
+            bb_dn = float(row.get('BB_DN', 0))
+            close_px = float(row['Close'])
+            if best['direction'] == 'LONG' and close_px > bb_up:
+                boost_reasons.append(('bb_break_up', 7))
+            elif best['direction'] == 'SHORT' and close_px < bb_dn:
+                boost_reasons.append(('bb_break_dn', 7))
+
+        # 4) RSI sağlıklı bölge
+        if 'RSI' in df.columns:
+            rsi = float(row.get('RSI', 50))
+            if 35 <= rsi <= 65:
+                boost_reasons.append(('rsi_healthy', 3))
+
+        total_boost = sum(b for _, b in boost_reasons)
+        if total_boost != 0:
+            best = dict(best) if 'confluence' not in best else best
+            best['confidence'] = max(10, min(95, best['confidence'] + total_boost))
+            best['quality_boost'] = boost_reasons
+    except Exception:
+        pass
 
     return best
 

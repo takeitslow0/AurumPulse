@@ -656,14 +656,14 @@ def _get_daily_pnl():
 
 def _calculate_auto_lot(sl_distance):
     """$300 günlük hedefe göre otomatik lot hesapla.
-    v6.6: max lot DINAMIK — bakiye büyüdükçe doğal olarak büyür.
+    v6.6/v6.7: max lot DINAMIK — bakiye büyüdükçe doğal olarak büyür.
 
-    Formül: max_lot = balance × 0.0005
-      $100  →  0.05 lot (~$47 notional risk, 100:1 kaldıraçla güvenli)
-      $500  →  0.25 lot
-      $1000 →  0.50 lot
-      $5000 →  2.50 lot
-    Bu gerçek broker 100:1 kaldıraç margin'ine uyumlu — sim ile canlı açığı kapar.
+    Formül: max_lot = balance × 0.0002 (100:1 broker uyumlu gerçekçi)
+      $100  →  0.02 lot (~$9.400 notional — tam 100:1 sınırında)
+      $500  →  0.10 lot
+      $1000 →  0.20 lot
+      $5000 →  1.00 lot
+    Bu gerçek broker margin'ine bire bir uyumlu. Sim → canlı geçişte lot değişmez.
     """
     daily = _get_daily_pnl()
     remaining = max(DAILY_TARGET - daily['realized'], 50)  # En az $50 hedef
@@ -679,7 +679,7 @@ def _calculate_auto_lot(sl_distance):
 
     # Dynamic max_lot = balance × 0.0005, tabanda 0.01, tavanda 5.0
     balance = ACCOUNT_CONFIG.get('balance', 100.0)
-    dynamic_max = max(0.01, min(5.0, balance * 0.0005))
+    dynamic_max = max(0.01, min(5.0, balance * 0.0002))
 
     lot = round(max(min(raw_lot, dynamic_max), 0.01), 2)
     return lot
@@ -3177,7 +3177,7 @@ def detect_patterns(df, idx, atr):
 
     best = max(patterns_found, key=lambda x: x['confidence'])
 
-    # v6.3: Multi-pattern confluence boost — aynı yönde 2+ pattern varsa güven artırılır
+    # v6.3: Multi-pattern confluence boost
     same_dir = sum(1 for x in patterns_found if x['direction'] == best['direction'])
     if same_dir >= 2:
         best = dict(best)
@@ -3185,7 +3185,57 @@ def detect_patterns(df, idx, atr):
         best['confidence'] = min(95, best['confidence'] + boost)
         best['confluence'] = same_dir
 
-    print(f"   🔍 Pattern: {best['pattern']} ({best['confidence']}%, conf×{best.get('confluence', 1)}) — {len(patterns_found)} aday")
+    # v6.7: Quality booster — volume spike, VWAP alignment, BB breakout, RSI sağlıklı
+    try:
+        row = df.iloc[idx]
+        boost_reasons = []
+        total_qboost = 0
+
+        # 1) Volume spike (son bar hacmi son 20-bar ortalamasının 1.5x üstünde)
+        if 'volume' in df.columns and len(df) >= idx + 1 and idx >= 20:
+            vol = float(row.get('volume', 0))
+            vol_avg = float(df['volume'].iloc[max(0, idx-19):idx+1].mean())
+            if vol_avg > 0 and vol >= 1.5 * vol_avg:
+                boost_reasons.append(('vol_spike', 8))
+                total_qboost += 8
+
+        # 2) VWAP alignment (sadece pozitif boost, ceza yok)
+        vwap = float(row.get('VWAP', 0))
+        close_px = float(row.get('close', 0))
+        if vwap > 0 and close_px > 0:
+            aligned = (best['direction'] == 'LONG' and close_px > vwap) or \
+                      (best['direction'] == 'SHORT' and close_px < vwap)
+            if aligned:
+                boost_reasons.append(('vwap_align', 5))
+                total_qboost += 5
+
+        # 3) Bollinger breakout — bandın dışı = güçlü momentum
+        bb_up = float(row.get('BB_Up', 0))
+        bb_low = float(row.get('BB_Low', 0))
+        if best['direction'] == 'LONG' and bb_up > 0 and close_px > bb_up:
+            boost_reasons.append(('bb_break_up', 7))
+            total_qboost += 7
+        elif best['direction'] == 'SHORT' and bb_low > 0 and close_px < bb_low:
+            boost_reasons.append(('bb_break_dn', 7))
+            total_qboost += 7
+
+        # 4) RSI sağlıklı bölge (35-65)
+        rsi = float(row.get('RSI', 50))
+        if 35 <= rsi <= 65:
+            boost_reasons.append(('rsi_healthy', 3))
+            total_qboost += 3
+
+        if total_qboost != 0:
+            if 'confluence' not in best:
+                best = dict(best)
+            best['confidence'] = max(10, min(95, best['confidence'] + total_qboost))
+            best['quality_boost'] = boost_reasons
+    except Exception:
+        pass
+
+    conf_str = f"{best.get('confluence', 1)}×" if 'confluence' in best else ""
+    qb_str = f" +{sum(b for _,b in best.get('quality_boost',[]))}q" if 'quality_boost' in best else ""
+    print(f"   🔍 Pattern: {best['pattern']} ({best['confidence']}%{qb_str}, conf{conf_str}) — {len(patterns_found)} aday")
     return best
 
 
@@ -3298,7 +3348,7 @@ def generate_pattern_signal(current_price, atr_val, balance):
             risk_amount *= TRADE_MGMT['equity_high_conf_mult']
         raw_lot = risk_amount / (sl_distance * ACCOUNT_CONFIG['contract_size'])
         # v6.6: Dynamic max_lot — bakiye × 0.0005 (broker 100:1 margin uyumlu)
-        dynamic_max = max(0.01, min(5.0, balance * 0.0005))
+        dynamic_max = max(0.01, min(5.0, balance * 0.0002))
         lot = round(max(min(raw_lot, dynamic_max), ACCOUNT_CONFIG['min_lot']), 2)
     else:
         lot = ACCOUNT_CONFIG['min_lot']
