@@ -409,13 +409,17 @@ def _td_circuit_record(success):
 
 def _fetch_gold_from(name, url, params, extractor):
     """Tek bir kaynaktan gold fiyatı çeker, hata varsa 0 döner.
-    TwelveData rate-limit'i HTTP 200 ile body'de code:429 döndürür — bunu yakalıyoruz."""
+    v7.3: TwelveData URL'leri _safe_get'ten geçirip rate limiter'a sayılır.
+    Diğer kaynaklar (Binance, gold-api) doğrudan."""
     try:
-        resp = requests.get(url, params=params, timeout=6) if params else requests.get(url, timeout=6)
+        is_td = 'twelvedata.com' in url
+        if is_td:
+            resp = _safe_get(url, params)
+        else:
+            resp = requests.get(url, params=params, timeout=6) if params else requests.get(url, timeout=6)
         if resp.status_code != 200:
             return 0
         data = resp.json()
-        # TD / diğerleri 200 altında error döndürebilir
         if isinstance(data, dict) and (data.get('status') == 'error' or data.get('code') in (401, 403, 429)):
             logger.warning("%s fetch error: %s", name, str(data.get('message', ''))[:200])
             return 0
@@ -771,15 +775,20 @@ _call_times = []
 _rate_lock  = threading.Lock()
 
 def _safe_get(url, params):
+    """TD basic plan: 8 req/min. Eşiği 5'e indirip güvenli marj bırakıyoruz.
+    v7.3: lock'u dışarıya almıyoruz — bekleme süresi lock altında kalmasın
+    diye sleep dışarı alındı (deadlock + concurrent fetcher dostu)."""
     with _rate_lock:
         now = time.time()
         _call_times[:] = [t for t in _call_times if now - t < 60]
-        if len(_call_times) >= 7:
+        if len(_call_times) >= 5:
             wait = 61 - (now - _call_times[0])
-            if wait > 0:
-                print(f"⏳ Rate limit bekleniyor: {wait:.1f}sn")
-                time.sleep(wait)
-        _call_times.append(time.time())
+        else:
+            wait = 0
+        _call_times.append(now + max(0, wait))  # planlanan zamanı kaydet
+    if wait > 0:
+        logger.info("⏳ TD rate limit — %.1fsn bekleniyor", wait)
+        time.sleep(wait)
     return requests.get(url, params=params, timeout=12)
 
 # ─────────────────────────────────────────
@@ -5242,6 +5251,53 @@ def _cached(name, ttl_sec, fn):
     except Exception:
         logger.exception("%s cache fetch hatası", name)
         return entry['data'] if entry else None
+
+
+@app.route('/api/dxy_impact')
+def api_dxy_impact():
+    """DXY hareketinin altın için yorumu.
+    EUR/USD proxy kullanılıyor (ters ilişkili: EUR/USD ↑ → DXY ↓ → altın bullish)."""
+    try:
+        df, sym = get_dxy()
+        if df.empty or len(df) < 5 or 'close' not in df.columns:
+            return jsonify({'available': False, 'note': 'DXY verisi yok'})
+        last = float(df['close'].iloc[-1])
+        # Son 60 bar (1 saat) öncesi — yetersizse mevcut maximum
+        lookback = min(60, len(df) - 1)
+        prev = float(df['close'].iloc[-1 - lookback])
+        if prev == 0:
+            return jsonify({'available': False})
+        pct = ((last - prev) / prev) * 100
+        # EUR/USD ise işaret tersi (EUR/USD düştü = DXY yükseldi)
+        is_eurusd_proxy = 'EUR' in sym
+        dxy_pct = -pct if is_eurusd_proxy else pct
+
+        # Altın etkisi (negatif korelasyon, ortalama -1.2x)
+        gold_implied_pct = -dxy_pct * 1.2
+
+        if dxy_pct > 0.15:
+            impact, label = 'bearish', '🔻 BEARISH'
+            txt = f'DXY +{dxy_pct:.2f}% → USD güçlendi → altın için satış basıncı'
+        elif dxy_pct < -0.15:
+            impact, label = 'bullish', '🟢 BULLISH'
+            txt = f'DXY {dxy_pct:.2f}% → USD zayıfladı → altın için alım baskısı'
+        else:
+            impact, label = 'neutral', '⚪ NÖTR'
+            txt = f'DXY {dxy_pct:+.2f}% → kayda değer hareket yok'
+
+        return jsonify({
+            'available': True,
+            'proxy_symbol': sym,
+            'dxy_pct_1h': round(dxy_pct, 3),
+            'gold_implied_pct': round(gold_implied_pct, 3),
+            'impact': impact,
+            'label': label,
+            'text': txt,
+            'lookback_bars': lookback,
+        })
+    except Exception as e:
+        logger.exception("dxy_impact hatası")
+        return jsonify({'available': False, 'error': str(e)})
 
 
 @app.route('/api/crypto/fear_greed')
