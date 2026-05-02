@@ -5223,6 +5223,215 @@ def api_closed_today():
                 trades.append(t)
     return jsonify({'trades': trades, 'count': len(trades)})
 
+# ═══════════════════════════════════════════
+# v7.2: KRİPTO MARKET-WIDE BİLGİ ENDPOINTLERİ
+# ═══════════════════════════════════════════
+
+_market_misc_cache = {}  # endpoint_name -> {'data':..., 'ts':...}
+
+def _cached(name, ttl_sec, fn):
+    """Basit time-based cache helper (rate limit korunması)."""
+    now = time.time()
+    entry = _market_misc_cache.get(name)
+    if entry and (now - entry['ts']) < ttl_sec:
+        return entry['data']
+    try:
+        data = fn()
+        _market_misc_cache[name] = {'data': data, 'ts': now}
+        return data
+    except Exception:
+        logger.exception("%s cache fetch hatası", name)
+        return entry['data'] if entry else None
+
+
+@app.route('/api/crypto/fear_greed')
+def api_fear_greed():
+    """Crypto Fear & Greed Index — alternative.me free, key gerekmez."""
+    def _fetch():
+        r = requests.get('https://api.alternative.me/fng/?limit=1', timeout=8)
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        item = (d.get('data') or [{}])[0]
+        return {
+            'value': int(item.get('value', 50)),
+            'classification': item.get('value_classification', 'Neutral'),
+            'timestamp': int(item.get('timestamp', time.time())),
+        }
+    data = _cached('fear_greed', 1800, _fetch)  # 30 dk cache
+    if not data:
+        return jsonify({'error': 'fetch_failed'}), 502
+    return jsonify(data)
+
+
+@app.route('/api/crypto/funding_rates')
+def api_funding_rates():
+    """Binance perpetual funding rates — kripto rejim göstergesi."""
+    symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT']
+
+    def _fetch():
+        out = {}
+        for sym in symbols:
+            try:
+                r = requests.get(
+                    'https://fapi.binance.com/fapi/v1/premiumIndex',
+                    params={'symbol': sym}, timeout=6,
+                )
+                if r.status_code == 200:
+                    d = r.json()
+                    rate = float(d.get('lastFundingRate', 0))
+                    out[sym] = {
+                        'rate': rate,
+                        'rate_pct': round(rate * 100, 4),  # % cinsinden
+                        'mark_price': float(d.get('markPrice', 0)),
+                        'next_funding_time': int(d.get('nextFundingTime', 0)),
+                    }
+            except Exception:
+                continue
+        return out
+
+    data = _cached('funding_rates', 300, _fetch)  # 5 dk cache
+    if not data:
+        return jsonify({'error': 'binance_unreachable', 'note': 'Binance bu konumdan erişilemiyor olabilir'}), 502
+    return jsonify(data)
+
+
+@app.route('/api/crypto/correlation')
+def api_correlation():
+    """BTC ile ETH/SOL/XRP arasındaki Pearson korelasyonu — son 50 bar."""
+    symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT']
+    try:
+        closes = {}
+        for sym in symbols:
+            df = get_crypto_data(sym, '1m')
+            if not df.empty and 'close' in df.columns and len(df) >= 30:
+                closes[sym] = df['close'].tail(50).pct_change().dropna()
+
+        if 'BTCUSDT' not in closes or len(closes) < 2:
+            return jsonify({'error': 'insufficient_data',
+                            'note': 'Yeterli kripto verisi yok (Binance erişilemez olabilir)'}), 503
+
+        btc_returns = closes['BTCUSDT']
+        result = {}
+        for sym, returns in closes.items():
+            if sym == 'BTCUSDT':
+                result[sym] = 1.0
+                continue
+            try:
+                aligned = pd.concat([btc_returns, returns], axis=1, join='inner').dropna()
+                if len(aligned) >= 10:
+                    corr = aligned.corr().iloc[0, 1]
+                    result[sym] = round(float(corr), 3) if not np.isnan(corr) else 0.0
+                else:
+                    result[sym] = 0.0
+            except Exception:
+                result[sym] = 0.0
+        return jsonify({'correlations': result, 'base': 'BTCUSDT', 'window_bars': 50})
+    except Exception as e:
+        logger.exception("correlation hatası")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/crypto/volume_profile/<symbol>')
+def api_volume_profile(symbol):
+    """OHLCV verisinden basit hacim profili — fiyat bant'larına göre hacim."""
+    try:
+        df = get_crypto_data(symbol.upper(), '1m')
+        if df.empty or 'close' not in df.columns:
+            return jsonify({'error': 'no_data'}), 503
+        df_tail = df.tail(60)  # son 60 bar
+        prices = df_tail['close'].values
+        volumes = df_tail.get('volume', pd.Series([1] * len(df_tail))).values
+        if len(prices) < 5:
+            return jsonify({'error': 'insufficient_data'}), 503
+
+        p_min, p_max = float(prices.min()), float(prices.max())
+        if p_max == p_min:
+            return jsonify({'error': 'flat_price'}), 503
+
+        n_bins = 10
+        bin_width = (p_max - p_min) / n_bins
+        bins = [{'low': p_min + i * bin_width, 'high': p_min + (i + 1) * bin_width, 'volume': 0.0}
+                for i in range(n_bins)]
+        for px, vol in zip(prices, volumes):
+            idx = min(int((float(px) - p_min) / bin_width), n_bins - 1)
+            bins[idx]['volume'] += float(vol)
+
+        # POC (Point of Control) = en yüksek hacimli bar
+        poc_idx = max(range(n_bins), key=lambda i: bins[i]['volume'])
+        return jsonify({
+            'symbol': symbol.upper(),
+            'bins': bins,
+            'poc_low': bins[poc_idx]['low'],
+            'poc_high': bins[poc_idx]['high'],
+            'current_price': float(prices[-1]),
+        })
+    except Exception as e:
+        logger.exception("volume_profile hatası")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/crypto/whales')
+def api_whales():
+    """Whale alerts proxy — CoinGecko top movers (gerçek tx whale-alert.io paid).
+    Top 50'den 24h % en büyük hareket eden coin'ler = market whale aktivitesi."""
+    def _fetch():
+        r = requests.get(
+            'https://api.coingecko.com/api/v3/coins/markets',
+            params={
+                'vs_currency': 'usd',
+                'order': 'percent_change_24h_desc',
+                'per_page': 10,
+                'sparkline': 'false',
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        coins = r.json() or []
+        movers_up = []
+        for c in coins[:5]:
+            movers_up.append({
+                'symbol': (c.get('symbol') or '').upper(),
+                'name': c.get('name', ''),
+                'price': c.get('current_price', 0),
+                'change_24h': round(c.get('price_change_percentage_24h', 0) or 0, 2),
+                'volume_24h': c.get('total_volume', 0),
+                'market_cap_rank': c.get('market_cap_rank', 999),
+            })
+        # Düşenleri ayrı çağır
+        r2 = requests.get(
+            'https://api.coingecko.com/api/v3/coins/markets',
+            params={
+                'vs_currency': 'usd',
+                'order': 'percent_change_24h_asc',
+                'per_page': 5,
+                'sparkline': 'false',
+            },
+            timeout=10,
+        )
+        movers_down = []
+        if r2.status_code == 200:
+            for c in (r2.json() or [])[:5]:
+                movers_down.append({
+                    'symbol': (c.get('symbol') or '').upper(),
+                    'name': c.get('name', ''),
+                    'price': c.get('current_price', 0),
+                    'change_24h': round(c.get('price_change_percentage_24h', 0) or 0, 2),
+                    'volume_24h': c.get('total_volume', 0),
+                    'market_cap_rank': c.get('market_cap_rank', 999),
+                })
+        return {
+            'top_gainers': movers_up,
+            'top_losers': movers_down,
+            'note': 'CoinGecko 24h top/flop movers (gerçek tx-whale değil).',
+        }
+    data = _cached('whales', 600, _fetch)  # 10 dk cache
+    if not data:
+        return jsonify({'error': 'fetch_failed'}), 502
+    return jsonify(data)
+
+
 @app.route('/api/geopolitics')
 def api_geopolitics():
     """Jeopolitik tehdit seviyesi ve haberleri"""

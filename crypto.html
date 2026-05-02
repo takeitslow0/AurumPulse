@@ -81,6 +81,46 @@
     .coin-change.flat{background:rgba(255,255,255,0.05);color:var(--text2)}
     /* Top mover highlight */
     .coin-card.top-mover{border-color:var(--gold);box-shadow:0 0 0 1px var(--gold-dim)}
+    /* v7.2: Fear & Greed gauge */
+    .fng-card{display:flex;align-items:center;gap:14px;padding:10px 14px;border-radius:8px;background:var(--card);border:1px solid var(--card-border);min-width:200px}
+    .fng-bar{flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#EF4444 0%,#F59E0B 25%,#FCD34D 50%,#84CC16 75%,#22C55E 100%);position:relative}
+    .fng-marker{position:absolute;top:-3px;width:3px;height:14px;background:#fff;border-radius:2px;transform:translateX(-50%)}
+    .fng-text{display:flex;flex-direction:column;align-items:flex-end}
+    .fng-value{font-family:var(--mono);font-size:18px;font-weight:700}
+    .fng-label{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+    /* Funding rates strip */
+    .funding-row{display:flex;gap:10px;flex-wrap:wrap;padding:10px 14px;background:var(--card);border:1px solid var(--card-border);border-radius:8px;margin-bottom:14px}
+    .fund-chip{display:flex;flex-direction:column;align-items:center;padding:6px 14px;border-radius:6px;background:rgba(255,255,255,0.03);min-width:80px}
+    .fund-chip .fc-sym{font-size:10px;color:var(--text3);font-family:var(--mono)}
+    .fund-chip .fc-rate{font-family:var(--mono);font-size:13px;font-weight:600}
+    .fund-chip .fc-rate.pos{color:var(--green)}
+    .fund-chip .fc-rate.neg{color:var(--red)}
+    /* Correlation matrix */
+    .corr-card{background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 14px;margin-bottom:14px}
+    .corr-title{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+    .corr-row{display:grid;grid-template-columns:60px 1fr 60px;align-items:center;gap:10px;font-size:12px;font-family:var(--mono);padding:4px 0}
+    .corr-bar{height:6px;border-radius:3px;background:rgba(255,255,255,0.05);overflow:hidden;position:relative}
+    .corr-bar-fill{height:100%;border-radius:3px;background:var(--purple)}
+    .corr-val{text-align:right;font-weight:600}
+    /* Whales / market movers */
+    .whale-card{background:var(--card);border:1px solid var(--card-border);border-radius:8px;padding:12px 14px;margin-bottom:14px}
+    .whale-section{margin-top:8px}
+    .whale-section-title{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+    .whale-item{display:flex;align-items:center;gap:8px;font-size:12px;font-family:var(--mono);padding:4px 0;border-bottom:1px dashed rgba(255,255,255,0.04)}
+    .whale-item:last-child{border-bottom:none}
+    .whale-item .ws-sym{font-weight:600;color:var(--text);min-width:60px}
+    .whale-item .ws-pct{font-weight:700;min-width:60px;text-align:right}
+    .whale-item .ws-pct.up{color:var(--green)}
+    .whale-item .ws-pct.down{color:var(--red)}
+    .whale-item .ws-name{color:var(--text2);font-family:var(--sans);font-size:11px;flex:1}
+    /* Volume profile (detail panel) */
+    .vp-card{background:rgba(0,0,0,0.2);border:1px solid var(--card-border);border-radius:8px;padding:10px 12px;margin-top:10px}
+    .vp-title{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+    .vp-row{display:grid;grid-template-columns:80px 1fr 50px;align-items:center;gap:8px;font-size:10px;font-family:var(--mono);padding:2px 0}
+    .vp-bar{height:8px;background:rgba(255,255,255,0.05);border-radius:2px;overflow:hidden}
+    .vp-bar-fill{height:100%;background:var(--purple);opacity:0.6}
+    .vp-row.poc .vp-bar-fill{background:var(--gold);opacity:1}
+    .vp-row.poc{font-weight:700;color:var(--gold)}
 
     /* COIN CARD */
     .coin-card{background:var(--card);border:1px solid var(--card-border);border-radius:12px;padding:16px;cursor:pointer;transition:all .2s}
@@ -227,28 +267,60 @@
 
     <!-- CONTENT -->
     <div class="content">
-      <!-- v7.1: Market breadth özet -->
-      <div class="breadth-card">
-        <div class="breadth-icon">🌐</div>
-        <div class="breadth-content">
-          <div class="breadth-item">
-            <span class="lbl">Boğa</span>
-            <span class="val green" id="breadthBull">0</span>
+      <!-- v7.1: Market breadth + v7.2: Fear & Greed yan yana -->
+      <div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+        <div class="breadth-card" style="flex:1;min-width:300px;margin-bottom:0">
+          <div class="breadth-icon">🌐</div>
+          <div class="breadth-content">
+            <div class="breadth-item"><span class="lbl">Boğa</span><span class="val green" id="breadthBull">0</span></div>
+            <div class="breadth-item"><span class="lbl">Ayı</span><span class="val red" id="breadthBear">0</span></div>
+            <div class="breadth-item"><span class="lbl">Nötr</span><span class="val gold" id="breadthNeutral">0</span></div>
+            <div class="breadth-item"><span class="lbl">Top Mover</span><span class="val" id="breadthMover">--</span></div>
           </div>
-          <div class="breadth-item">
-            <span class="lbl">Ayı</span>
-            <span class="val red" id="breadthBear">0</span>
+          <span class="breadth-mood mixed" id="breadthMood">KARMA</span>
+        </div>
+        <!-- Fear & Greed gauge -->
+        <div class="fng-card">
+          <div style="font-size:24px">😱</div>
+          <div style="flex:1">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Fear &amp; Greed</div>
+            <div class="fng-bar"><div class="fng-marker" id="fngMarker" style="left:50%"></div></div>
           </div>
-          <div class="breadth-item">
-            <span class="lbl">Nötr</span>
-            <span class="val gold" id="breadthNeutral">0</span>
-          </div>
-          <div class="breadth-item">
-            <span class="lbl">Top Mover</span>
-            <span class="val" id="breadthMover">--</span>
+          <div class="fng-text">
+            <span class="fng-value" id="fngValue">--</span>
+            <span class="fng-label" id="fngLabel">Loading</span>
           </div>
         </div>
-        <span class="breadth-mood mixed" id="breadthMood">KARMA</span>
+      </div>
+
+      <!-- v7.2: Funding rates strip -->
+      <div class="funding-row" id="fundingRow">
+        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;align-self:center;margin-right:6px">Funding (8h)</div>
+        <div class="fund-chip"><span class="fc-sym">BTC</span><span class="fc-rate" id="fund_BTCUSDT">--</span></div>
+        <div class="fund-chip"><span class="fc-sym">ETH</span><span class="fc-rate" id="fund_ETHUSDT">--</span></div>
+        <div class="fund-chip"><span class="fc-sym">SOL</span><span class="fc-rate" id="fund_SOLUSDT">--</span></div>
+        <div class="fund-chip"><span class="fc-sym">XRP</span><span class="fc-rate" id="fund_XRPUSDT">--</span></div>
+      </div>
+
+      <!-- v7.2: Korelasyon + Whales yan yana -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px" class="grid-2">
+        <div class="corr-card">
+          <div class="corr-title">📊 BTC ile Korelasyon (son 50 bar)</div>
+          <div id="corrRows">
+            <div style="font-size:11px;color:var(--text3);font-style:italic">Yükleniyor...</div>
+          </div>
+        </div>
+        <div class="whale-card">
+          <div class="corr-title">🐋 Top Movers (CoinGecko 24h)</div>
+          <div class="whale-section">
+            <div class="whale-section-title">📈 En Çok Yükselen</div>
+            <div id="whalesUp"><div style="font-size:11px;color:var(--text3);font-style:italic">Yükleniyor...</div></div>
+          </div>
+          <div class="whale-section">
+            <div class="whale-section-title">📉 En Çok Düşen</div>
+            <div id="whalesDown"></div>
+          </div>
+        </div>
       </div>
 
       <!-- COIN GRID -->
@@ -336,6 +408,13 @@
           <!-- CHART -->
           <div class="chart-wrap"><div id="coinChart"></div></div>
           <div class="chart-wrap" style="min-height:140px"><div id="rsiChart"></div></div>
+          <!-- v7.2: Volume profile -->
+          <div class="vp-card">
+            <div class="vp-title">📊 Hacim Profili (son 60 bar) — POC altın renkte</div>
+            <div id="vpRows">
+              <div style="font-size:10px;color:var(--text3);font-style:italic">Coin seç → veri yüklenir</div>
+            </div>
+          </div>
 
           <!-- POSITIONS -->
           <div class="pos-section" id="posSection" style="display:none">
@@ -503,6 +582,7 @@ function selectCoin(symbol) {
   if (card) card.classList.add('selected');
   document.getElementById('detailPanel').style.display = 'block';
   loadCoinDetail(symbol);
+  loadVolumeProfile(symbol);  // v7.2
 }
 
 // ═══ LOAD COIN DETAIL ═══
@@ -690,6 +770,123 @@ async function resetSim() {
 loadAllData();
 loadTradeStats();
 setInterval(loadAllData, 30000);
+
+// ═══ v7.2: Fear & Greed, Funding, Korelasyon, Whales ═══
+async function loadFearGreed() {
+  try {
+    const r = await fetch(`${API_BASE}/api/crypto/fear_greed`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const v = d.value ?? 50;
+    document.getElementById('fngValue').textContent = v;
+    document.getElementById('fngLabel').textContent = (d.classification || '').toUpperCase();
+    const marker = document.getElementById('fngMarker');
+    if (marker) marker.style.left = `${Math.max(0, Math.min(100, v))}%`;
+    const valEl = document.getElementById('fngValue');
+    valEl.style.color = v < 25 ? '#EF4444' : v < 45 ? '#F59E0B' : v < 55 ? '#FCD34D' : v < 75 ? '#84CC16' : '#22C55E';
+  } catch(e) {}
+}
+
+async function loadFundingRates() {
+  try {
+    const r = await fetch(`${API_BASE}/api/crypto/funding_rates`);
+    if (!r.ok) {
+      ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'].forEach(s => {
+        const el = document.getElementById('fund_' + s);
+        if (el) { el.textContent = 'N/A'; el.className = 'fc-rate'; }
+      });
+      return;
+    }
+    const d = await r.json();
+    Object.entries(d).forEach(([sym, info]) => {
+      const el = document.getElementById('fund_' + sym);
+      if (!el) return;
+      const pct = info.rate_pct ?? 0;
+      const sign = pct >= 0 ? '+' : '';
+      el.textContent = `${sign}${pct.toFixed(4)}%`;
+      el.className = 'fc-rate ' + (pct > 0 ? 'pos' : pct < 0 ? 'neg' : '');
+    });
+  } catch(e) {}
+}
+
+async function loadCorrelation() {
+  try {
+    const r = await fetch(`${API_BASE}/api/crypto/correlation`);
+    const d = await r.json();
+    const container = document.getElementById('corrRows');
+    if (!container) return;
+    if (d.error) {
+      container.innerHTML = `<div style="font-size:11px;color:var(--text3);font-style:italic">${d.note || d.error}</div>`;
+      return;
+    }
+    const meta = {BTCUSDT:'BTC', ETHUSDT:'ETH', SOLUSDT:'SOL', XRPUSDT:'XRP'};
+    container.innerHTML = '';
+    Object.entries(d.correlations || {}).forEach(([sym, val]) => {
+      if (sym === 'BTCUSDT') return;  // self-corr 1.0, atla
+      const row = document.createElement('div');
+      row.className = 'corr-row';
+      const widthPct = Math.abs(val) * 100;
+      const color = val >= 0.6 ? 'var(--green)' : val >= 0.3 ? 'var(--gold)' : val >= 0 ? 'var(--blue)' : 'var(--red)';
+      row.innerHTML = `
+        <span>BTC ↔ ${meta[sym] || sym}</span>
+        <div class="corr-bar"><div class="corr-bar-fill" style="width:${widthPct}%;background:${color}"></div></div>
+        <span class="corr-val" style="color:${color}">${val.toFixed(2)}</span>
+      `;
+      container.appendChild(row);
+    });
+  } catch(e) {}
+}
+
+async function loadWhales() {
+  try {
+    const r = await fetch(`${API_BASE}/api/crypto/whales`);
+    const d = await r.json();
+    const upEl = document.getElementById('whalesUp');
+    const dnEl = document.getElementById('whalesDown');
+    const renderRow = (it, isUp) => `
+      <div class="whale-item">
+        <span class="ws-sym">${it.symbol}</span>
+        <span class="ws-name">${it.name}</span>
+        <span class="ws-pct ${isUp ? 'up' : 'down'}">${it.change_24h >= 0 ? '+' : ''}${it.change_24h.toFixed(1)}%</span>
+      </div>
+    `;
+    if (upEl) upEl.innerHTML = (d.top_gainers || []).map(it => renderRow(it, true)).join('') || '<div style="font-size:11px;color:var(--text3)">Veri yok</div>';
+    if (dnEl) dnEl.innerHTML = (d.top_losers || []).map(it => renderRow(it, false)).join('') || '<div style="font-size:11px;color:var(--text3)">Veri yok</div>';
+  } catch(e) {}
+}
+
+async function loadVolumeProfile(symbol) {
+  if (!symbol) return;
+  try {
+    const r = await fetch(`${API_BASE}/api/crypto/volume_profile/${symbol}`);
+    const d = await r.json();
+    const container = document.getElementById('vpRows');
+    if (!container) return;
+    if (d.error) {
+      container.innerHTML = `<div style="font-size:10px;color:var(--text3);font-style:italic">${d.error === 'no_data' ? 'Veri yok' : d.error}</div>`;
+      return;
+    }
+    const maxVol = Math.max(...d.bins.map(b => b.volume), 1);
+    container.innerHTML = '';
+    // Bins yukarıdan aşağıya (yüksek fiyat üstte)
+    [...d.bins].reverse().forEach(b => {
+      const isPoc = b.low === d.poc_low;
+      const widthPct = (b.volume / maxVol) * 100;
+      const row = document.createElement('div');
+      row.className = 'vp-row' + (isPoc ? ' poc' : '');
+      row.innerHTML = `
+        <span>$${b.low.toFixed(2)}-${b.high.toFixed(2)}</span>
+        <div class="vp-bar"><div class="vp-bar-fill" style="width:${widthPct}%"></div></div>
+        <span style="text-align:right">${b.volume === 0 ? '-' : (b.volume > 1e6 ? (b.volume/1e6).toFixed(1)+'M' : b.volume.toFixed(0))}</span>
+      `;
+      container.appendChild(row);
+    });
+  } catch(e) {}
+}
+
+// İlk yükle + 5dk'da bir tekrar (F&G saatlik değişir, funding 8h, whales saatlik)
+loadFearGreed(); loadFundingRates(); loadCorrelation(); loadWhales();
+setInterval(() => { loadFearGreed(); loadFundingRates(); loadCorrelation(); loadWhales(); }, 300000);
 setInterval(loadTradeStats, 60000);
 setInterval(() => { if (selectedCoin) loadCoinDetail(selectedCoin); }, 30000);
 </script>
