@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 import feedparser
 import traceback
 import random as _rnd  # tick simülasyonu için
+import database
 from database import (init_db, save_market_data, get_recent_history, save_trade,
                        load_all_trades, save_active_positions, load_active_positions)
 
@@ -34,10 +35,19 @@ from functools import wraps
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# .env dosyasını yükle (python-dotenv opsiyonel — yoksa OS env kullanılır)
+# .env dosyasını yükle. Önce AURUMPULSE_DATA_DIR/.env (masaüstü kurulumu),
+# sonra _BASE_DIR/.env (dev / Railway).
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(_BASE_DIR, '.env'))
+    _data_dir = os.environ.get('AURUMPULSE_DATA_DIR', '').strip()
+    if _data_dir:
+        _env_path = os.path.join(_data_dir, '.env')
+        if os.path.exists(_env_path):
+            load_dotenv(_env_path)
+        else:
+            load_dotenv(os.path.join(_BASE_DIR, '.env'))
+    else:
+        load_dotenv(os.path.join(_BASE_DIR, '.env'))
 except ImportError:
     pass
 
@@ -95,7 +105,7 @@ def reset_balance():
         _daily_state['pause_reason'] = ''
     try:
         import sqlite3
-        conn = sqlite3.connect(os.path.join(_BASE_DIR, 'aurumpulse.db'))
+        conn = sqlite3.connect(database.DB_NAME)
         conn.execute('DELETE FROM trade_history')
         conn.execute('DELETE FROM active_positions')
         conn.commit()
@@ -176,7 +186,7 @@ def restore_state():
 
         # DB'ye yaz
         import sqlite3
-        conn = sqlite3.connect(os.path.join(_BASE_DIR, 'aurumpulse.db'))
+        conn = sqlite3.connect(database.DB_NAME)
         conn.execute('DELETE FROM trade_history')
         conn.execute('DELETE FROM active_positions')
         if pnl_delta != 0:

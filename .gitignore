@@ -8,3 +8,7 @@ venv/
 .venv/
 *.log
 .claude/
+# PyInstaller build artifacts
+build/
+dist/
+*.spec

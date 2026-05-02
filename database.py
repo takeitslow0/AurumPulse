@@ -1,7 +1,15 @@
+import os
 import sqlite3
 from datetime import datetime
 
-DB_NAME = 'aurumpulse.db'
+# v7.0: DB konumu env'den ayarlanabilir — masaüstü uygulamasında
+# %APPDATA%/AurumPulse/aurumpulse.db kullanılsın diye.
+_DATA_DIR = os.environ.get('AURUMPULSE_DATA_DIR', '').strip()
+if _DATA_DIR:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    DB_NAME = os.path.join(_DATA_DIR, 'aurumpulse.db')
+else:
+    DB_NAME = 'aurumpulse.db'
 
 
 def init_db():

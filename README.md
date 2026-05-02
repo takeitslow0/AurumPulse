@@ -21,18 +21,47 @@ Altın (XAU/USD) için gerçek zamanlı fiyat, korelasyon ve otomatik sinyal sim
 
 ## Kurulum
 
+### Masaüstü Uygulaması (önerilen)
+
+Tek `.exe` dosyası, çift tıklayıp çalıştır.
+
 ```bash
 git clone https://github.com/<kullanıcı>/AurumPulse.git
 cd AurumPulse
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+venv\Scripts\activate          # Windows; Mac/Linux: source venv/bin/activate
+pip install -r requirements.txt
+
+# 1) Test (geliştirme modu — pencere açılır)
+python launcher.py
+
+# 2) İlk açılışta %APPDATA%/AurumPulse/.env oluşur,
+#    o dosyayı editle, API anahtarlarını gir, tekrar başlat.
+
+# 3) Tek-dosya .exe build
+python build_desktop.py
+# Çıktı: dist/AurumPulse.exe (~80MB)
+
+# 4) Masaüstüne kısayol oluştur, çift tıkla, hazır.
+```
+
+**Veri konumu:**
+- Windows: `%APPDATA%/AurumPulse/` (`aurumpulse.db` + `.env`)
+- Mac: `~/Library/Application Support/AurumPulse/`
+- Linux: `~/.local/share/AurumPulse/`
+
+DB ve ayarlar burada kalıcı — uygulama silinince bile kaybolmaz.
+
+### Sunucu Modu (Railway / VPS)
+
+```bash
 pip install -r requirements.txt
 cp .env.example .env
-# .env dosyasını editöre aç, değerleri doldur (özellikle API_KEY)
+# .env'i düzenle, API_KEY zorunlu
 python backend.py
 ```
 
-Açıldıktan sonra: `http://localhost:5000` (altın), `http://localhost:5000/crypto` (kripto — backend'te route varsa).
+`http://localhost:5000` üzerinden açılır.
 
 ## Environment değişkenleri
 
