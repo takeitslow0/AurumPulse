@@ -4218,6 +4218,11 @@ def build_response_payload(interval='1min'):
                         confidence = pattern_signal.get('confidence', 0)
 
                         sig_type = f"🎯 {pattern_name} — {trend.upper()} (Conf: {confidence}%)"
+                        # v7.1: zenginleştirilmiş analysis — confluence + quality_boost detayları
+                        _pi = pattern_signal.get('pattern_info', {}) or {}
+                        confluence = _pi.get('confluence', 1)
+                        quality_boost = _pi.get('quality_boost', [])
+
                         analysis = {
                             'htf': 'Pattern detected',
                             'structure': f'Pattern: {pattern_name}',
@@ -4227,9 +4232,29 @@ def build_response_payload(interval='1min'):
                             'confidence': f'{confidence}%',
                             'pattern': pattern_name,
                             'pattern_height': pattern_signal.get('pattern_height', 0),
+                            'confluence': confluence,
+                            'quality_boost': quality_boost,
                         }
+
+                        # quality_reasons — frontend verdict box için ayrıntılı sebep listesi
+                        quality_reasons = [f"📊 Pattern: {pattern_name} (%{confidence})"]
+                        if confluence >= 2:
+                            quality_reasons.append(f"🎯 Confluence: {confluence} pattern aynı yönde")
+                        for tag, boost in quality_boost:
+                            tag_label = {
+                                'vol_spike': '📈 Hacim spike',
+                                'vwap_align': '✅ VWAP yön uyumlu',
+                                'bb_break_up': '🚀 Bollinger üst bant kırıldı',
+                                'bb_break_dn': '🔻 Bollinger alt bant kırıldı',
+                                'rsi_healthy': '💪 RSI sağlıklı bölge',
+                            }.get(tag, tag)
+                            quality_reasons.append(f"{tag_label} (+{boost})")
+                        if direction == 'LONG':
+                            quality_reasons.append("🟢 Yön: LONG (yükseliş)")
+                        else:
+                            quality_reasons.append("🔴 Yön: SHORT (düşüş)")
+
                         quality_score = min(9, confidence // 10) if confidence > 0 else 0
-                        quality_reasons = [pattern_name]
 
                         should_open = True  # v5.7: Pattern signals open directly
 
@@ -5576,10 +5601,33 @@ def binance_klines(symbol, interval='1m', limit=300):
         except Exception as e:
             continue
 
-    # Binance başarısız → kripto verisini atla (TD fallback KAPALI — altın kredisini korur).
-    # Binance Railway'in ABD IP aralığını bloklayabiliyor; bu durumda kripto paneli
-    # veri olmadan görünür, ama altın (ana modül) TD kredisinden etkilenmez.
-    logger.warning("Kripto verisi alınamadı: %s — Binance erişilemez, TD fallback devre dışı (altın kredisi korumak için)", symbol)
+    # v7.1: Binance başarısız → CoinGecko fallback (free, IP-block yok, key gerekmez).
+    cg_id_map = {
+        'BTCUSDT': 'bitcoin', 'ETHUSDT': 'ethereum',
+        'SOLUSDT': 'solana', 'XRPUSDT': 'ripple',
+    }
+    cg_id = cg_id_map.get(symbol)
+    if cg_id:
+        try:
+            # CoinGecko OHLC: 1 day verisi → 30dk-1h bar genişliği döner.
+            # 1m/5m yok ama signal motoru cluster aware; "yakın geçmişin OHLC'si" yeterli.
+            r = requests.get(
+                f'https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc',
+                params={'vs_currency': 'usd', 'days': 1},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if data and isinstance(data, list) and len(data) > 0:
+                    df = pd.DataFrame(data, columns=['ts', 'open', 'high', 'low', 'close'])
+                    df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
+                    df['volume'] = 0  # CoinGecko OHLC endpoint hacim vermiyor
+                    print(f"📊 CoinGecko fallback: {cg_id} ({len(df)} bar)")
+                    return df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+        except Exception as e:
+            logger.warning("CoinGecko fallback hatası (%s): %s", cg_id, e)
+
+    logger.warning("Kripto verisi alınamadı: %s — tüm kaynaklar başarısız", symbol)
     return pd.DataFrame()
 
 

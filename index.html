@@ -82,6 +82,27 @@
     .sc-reasons li.sub{margin-left:10px;font-size:9px;color:var(--text3)}
     .market-banner.bullish{border-color:rgba(34,197,94,0.4);background:linear-gradient(90deg,rgba(34,197,94,0.08),rgba(212,168,67,0.06))}
     .market-banner.bearish{border-color:rgba(239,68,68,0.45);background:linear-gradient(90deg,rgba(239,68,68,0.12),rgba(212,168,67,0.06))}
+    /* v7.1: Verdict Box — büyük sinyal kartı */
+    .verdict-box{margin:8px 12px 12px;padding:16px 20px;border-radius:12px;border:1px solid var(--card-border);background:var(--card)}
+    .verdict-box.bullish{background:linear-gradient(135deg,rgba(34,197,94,0.12),rgba(34,197,94,0.02));border-color:rgba(34,197,94,0.4)}
+    .verdict-box.bearish{background:linear-gradient(135deg,rgba(239,68,68,0.12),rgba(239,68,68,0.02));border-color:rgba(239,68,68,0.4)}
+    .verdict-box.neutral{background:linear-gradient(135deg,rgba(212,168,67,0.06),rgba(0,0,0,0.02));border-color:rgba(212,168,67,0.25)}
+    .verdict-main{display:flex;align-items:center;gap:16px;margin-bottom:12px}
+    .verdict-icon{font-size:36px;line-height:1}
+    .verdict-text{flex:1}
+    .verdict-direction{font-size:22px;font-weight:700;letter-spacing:0.5px}
+    .verdict-box.bullish .verdict-direction{color:var(--green)}
+    .verdict-box.bearish .verdict-direction{color:var(--red)}
+    .verdict-box.neutral .verdict-direction{color:var(--gold)}
+    .verdict-pattern{font-size:12px;color:var(--text2);margin-top:2px;font-family:var(--mono)}
+    .verdict-confidence{font-size:24px;font-weight:700;font-family:var(--mono);padding:6px 14px;border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text1)}
+    .verdict-box.bullish .verdict-confidence{background:rgba(34,197,94,0.18);color:var(--green)}
+    .verdict-box.bearish .verdict-confidence{background:rgba(239,68,68,0.18);color:var(--red)}
+    .verdict-reasons{display:flex;flex-wrap:wrap;gap:6px}
+    .verdict-reasons .vr-item{font-size:11px;padding:4px 10px;border-radius:14px;background:rgba(255,255,255,0.05);color:var(--text1);border:1px solid rgba(255,255,255,0.06);font-family:var(--mono)}
+    .verdict-reasons .vr-item.confluence{background:rgba(212,168,67,0.15);color:var(--gold);border-color:rgba(212,168,67,0.3);font-weight:600}
+    .verdict-reasons .vr-item.boost{background:rgba(59,130,246,0.12);color:var(--blue);border-color:rgba(59,130,246,0.25)}
+    .verdict-reasons .vr-empty{font-size:11px;color:var(--text2);font-style:italic}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
     /* ═══ PANELS ═══ */
@@ -300,6 +321,21 @@
       <!-- ═══════════════════════════════════ -->
       <div class="panels">
         <div class="panel active" id="panel-dashboard">
+          <!-- v7.1: VERDICT BOX — büyük yön + sebepler -->
+          <div id="verdictBox" class="verdict-box neutral">
+            <div class="verdict-main">
+              <div class="verdict-icon" id="verdictIcon">⏸️</div>
+              <div class="verdict-text">
+                <div class="verdict-direction" id="verdictDirection">BEKLENİYOR</div>
+                <div class="verdict-pattern" id="verdictPattern">Sinyal aranıyor...</div>
+              </div>
+              <div class="verdict-confidence" id="verdictConfidence">--</div>
+            </div>
+            <div class="verdict-reasons" id="verdictReasons">
+              <span class="vr-empty">Sistem analiz ediyor — birkaç saniye sonra sebepler burada listelenir</span>
+            </div>
+          </div>
+
           <!-- Active Positions -->
           <div class="pos-bar" id="activePositionBar">
             <div class="card-header">
@@ -852,6 +888,62 @@
         ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
+    // v7.1: Verdict Box render — sinyal yönü + sebepler
+    function updateVerdictBox(ts) {
+      const box = document.getElementById('verdictBox');
+      const iconEl = document.getElementById('verdictIcon');
+      const dirEl = document.getElementById('verdictDirection');
+      const patEl = document.getElementById('verdictPattern');
+      const confEl = document.getElementById('verdictConfidence');
+      const reasonsEl = document.getElementById('verdictReasons');
+      if (!box || !iconEl || !dirEl || !reasonsEl) return;
+
+      // Yön
+      const trend = ts.trend || 'nötr';
+      box.className = 'verdict-box ' + (trend === 'bullish' ? 'bullish' : trend === 'bearish' ? 'bearish' : 'neutral');
+      if (trend === 'bullish') {
+        iconEl.textContent = '📈';
+        dirEl.textContent = 'YÜKSELİŞ — LONG';
+      } else if (trend === 'bearish') {
+        iconEl.textContent = '📉';
+        dirEl.textContent = 'DÜŞÜŞ — SHORT';
+      } else {
+        iconEl.textContent = '⏸️';
+        dirEl.textContent = 'BEKLENİYOR';
+      }
+
+      // Pattern + güven
+      const a = ts.analysis || {};
+      const pat = a.pattern || ts.pattern || '';
+      const confluence = a.confluence || 1;
+      const confluenceTxt = confluence >= 2 ? ` · ${confluence} pattern uyumlu` : '';
+      patEl.textContent = pat ? `${pat}${confluenceTxt}` : (ts.signal || 'Pattern aranıyor...');
+
+      const confStr = (a.confidence || ts.pattern_confidence || '').toString().replace('%', '');
+      const confNum = parseFloat(confStr);
+      confEl.textContent = !isNaN(confNum) && confNum > 0 ? `${Math.round(confNum)}%` : '--';
+
+      // Sebepler
+      reasonsEl.innerHTML = '';
+      const reasons = ts.quality_reasons || [];
+      if (reasons.length === 0 || (reasons.length === 1 && !reasons[0])) {
+        reasonsEl.innerHTML = '<span class="vr-empty">Sistem analiz ediyor — sinyal bulunduğunda sebepler burada listelenir</span>';
+        return;
+      }
+      reasons.forEach(r => {
+        if (!r) return;
+        const span = document.createElement('span');
+        let cls = 'vr-item';
+        if (typeof r === 'string') {
+          if (r.includes('Confluence')) cls += ' confluence';
+          else if (r.includes('+') && r.includes(')')) cls += ' boost';  // quality boost reason
+        }
+        span.className = cls;
+        span.textContent = r;
+        reasonsEl.appendChild(span);
+      });
+    }
+
     async function loadWeekendForecast() {
       try {
         const res = await fetch(`${API_BASE}/api/weekend_forecast`);
@@ -1060,6 +1152,9 @@
             if (sigCard) sigCard.className = 'signal-card neutral';
             if (sigDir) { sigDir.textContent = 'NOTR'; sigDir.className = 'signal-direction neutral'; }
           }
+
+          // v7.1: VERDICT BOX güncelle
+          updateVerdictBox(ts);
 
           $set('sigSub', ts.signal || 'Sinyal bekleniyor...');
           $set('sigEntry', ts.entry > 0 ? '$' + ts.entry.toFixed(2) : '--');

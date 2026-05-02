@@ -60,6 +60,27 @@
     /* COIN GRID */
     .coin-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px}
     @media(max-width:900px){.coin-grid{grid-template-columns:1fr}}
+    /* v7.1: Market breadth özeti */
+    .breadth-card{display:flex;align-items:center;gap:16px;padding:14px 18px;margin-bottom:14px;background:linear-gradient(135deg,rgba(168,85,247,0.08),rgba(168,85,247,0.02));border:1px solid rgba(168,85,247,0.25);border-radius:10px}
+    .breadth-icon{font-size:24px}
+    .breadth-content{flex:1;display:flex;gap:24px;flex-wrap:wrap}
+    .breadth-item{display:flex;flex-direction:column;gap:1px}
+    .breadth-item .lbl{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+    .breadth-item .val{font-family:var(--mono);font-size:16px;font-weight:600}
+    .breadth-item .val.green{color:var(--green)}
+    .breadth-item .val.red{color:var(--red)}
+    .breadth-item .val.gold{color:var(--gold)}
+    .breadth-mood{font-size:13px;font-weight:600;padding:4px 12px;border-radius:14px;font-family:var(--mono)}
+    .breadth-mood.bullish{background:var(--green-dim);color:var(--green)}
+    .breadth-mood.bearish{background:var(--red-dim);color:var(--red)}
+    .breadth-mood.mixed{background:var(--gold-dim);color:var(--gold)}
+    /* 24h change pill */
+    .coin-change{font-size:10px;font-family:var(--mono);padding:2px 6px;border-radius:6px;margin-top:2px;display:inline-block}
+    .coin-change.up{background:var(--green-dim);color:var(--green)}
+    .coin-change.down{background:var(--red-dim);color:var(--red)}
+    .coin-change.flat{background:rgba(255,255,255,0.05);color:var(--text2)}
+    /* Top mover highlight */
+    .coin-card.top-mover{border-color:var(--gold);box-shadow:0 0 0 1px var(--gold-dim)}
 
     /* COIN CARD */
     .coin-card{background:var(--card);border:1px solid var(--card-border);border-radius:12px;padding:16px;cursor:pointer;transition:all .2s}
@@ -206,6 +227,30 @@
 
     <!-- CONTENT -->
     <div class="content">
+      <!-- v7.1: Market breadth özet -->
+      <div class="breadth-card">
+        <div class="breadth-icon">🌐</div>
+        <div class="breadth-content">
+          <div class="breadth-item">
+            <span class="lbl">Boğa</span>
+            <span class="val green" id="breadthBull">0</span>
+          </div>
+          <div class="breadth-item">
+            <span class="lbl">Ayı</span>
+            <span class="val red" id="breadthBear">0</span>
+          </div>
+          <div class="breadth-item">
+            <span class="lbl">Nötr</span>
+            <span class="val gold" id="breadthNeutral">0</span>
+          </div>
+          <div class="breadth-item">
+            <span class="lbl">Top Mover</span>
+            <span class="val" id="breadthMover">--</span>
+          </div>
+        </div>
+        <span class="breadth-mood mixed" id="breadthMood">KARMA</span>
+      </div>
+
       <!-- COIN GRID -->
       <div class="coin-grid" id="coinGrid">
         <div class="coin-card" data-symbol="BTCUSDT" onclick="selectCoin('BTCUSDT')">
@@ -214,6 +259,7 @@
             <div><div class="coin-name">Bitcoin</div><div class="coin-symbol">BTC/USDT</div></div>
           </div>
           <div class="coin-price" id="price_BTCUSDT">--</div>
+          <span class="coin-change flat" id="ch24_BTCUSDT">--</span>
           <div class="coin-signal">
             <span class="signal-badge neutral" id="sig_BTCUSDT">BEKLE</span>
             <span class="signal-conf" id="conf_BTCUSDT">--%</span>
@@ -226,6 +272,7 @@
             <div><div class="coin-name">Ethereum</div><div class="coin-symbol">ETH/USDT</div></div>
           </div>
           <div class="coin-price" id="price_ETHUSDT">--</div>
+          <span class="coin-change flat" id="ch24_ETHUSDT">--</span>
           <div class="coin-signal">
             <span class="signal-badge neutral" id="sig_ETHUSDT">BEKLE</span>
             <span class="signal-conf" id="conf_ETHUSDT">--%</span>
@@ -238,6 +285,7 @@
             <div><div class="coin-name">Solana</div><div class="coin-symbol">SOL/USDT</div></div>
           </div>
           <div class="coin-price" id="price_SOLUSDT">--</div>
+          <span class="coin-change flat" id="ch24_SOLUSDT">--</span>
           <div class="coin-signal">
             <span class="signal-badge neutral" id="sig_SOLUSDT">BEKLE</span>
             <span class="signal-conf" id="conf_SOLUSDT">--%</span>
@@ -250,6 +298,7 @@
             <div><div class="coin-name">XRP</div><div class="coin-symbol">XRP/USDT</div></div>
           </div>
           <div class="coin-price" id="price_XRPUSDT">--</div>
+          <span class="coin-change flat" id="ch24_XRPUSDT">--</span>
           <div class="coin-signal">
             <span class="signal-badge neutral" id="sig_XRPUSDT">BEKLE</span>
             <span class="signal-conf" id="conf_XRPUSDT">--%</span>
@@ -375,12 +424,20 @@ try {
 } catch(e) { console.log('Socket.IO hatası:', e); }
 
 // ═══ COIN GRID UPDATE ═══
+// v7.1: Önceki fiyat snapshot'ı — 24h % yerine "son tarama → şimdiki" değişimi gösteriyor
+const _prevPrices = {};
+
 function updateCoinGrid(signals) {
+  let bull = 0, bear = 0, neutral = 0;
+  let topMover = { symbol: '', pct: 0 };
+
   for (const [symbol, sig] of Object.entries(signals)) {
     const priceEl = document.getElementById('price_' + symbol);
     const sigEl = document.getElementById('sig_' + symbol);
     const confEl = document.getElementById('conf_' + symbol);
     const posEl = document.getElementById('pos_' + symbol);
+    const ch24El = document.getElementById('ch24_' + symbol);
+
     if (priceEl) priceEl.textContent = '$' + sig.price.toLocaleString('en-US', {minimumFractionDigits: 2});
     if (sigEl) {
       sigEl.textContent = sig.trend === 'bullish' ? 'LONG' : sig.trend === 'bearish' ? 'SHORT' : 'BEKLE';
@@ -389,6 +446,52 @@ function updateCoinGrid(signals) {
     if (confEl) confEl.textContent = sig.confidence + '%';
     if (posEl && sig.positions > 0) posEl.textContent = sig.positions + ' poz';
     else if (posEl) posEl.textContent = '';
+
+    // Trend sayacı
+    if (sig.trend === 'bullish') bull++;
+    else if (sig.trend === 'bearish') bear++;
+    else neutral++;
+
+    // Değişim hesapla (önceki snapshot'tan beri)
+    const prev = _prevPrices[symbol];
+    if (prev && prev > 0 && sig.price > 0) {
+      const pct = ((sig.price - prev) / prev) * 100;
+      if (ch24El) {
+        const sign = pct >= 0 ? '+' : '';
+        ch24El.textContent = sign + pct.toFixed(2) + '%';
+        ch24El.className = 'coin-change ' + (pct > 0.05 ? 'up' : pct < -0.05 ? 'down' : 'flat');
+      }
+      if (Math.abs(pct) > Math.abs(topMover.pct)) {
+        topMover = { symbol: symbol.replace('USDT', ''), pct };
+      }
+    }
+    _prevPrices[symbol] = sig.price;
+  }
+
+  // Market breadth özet
+  document.getElementById('breadthBull').textContent = bull;
+  document.getElementById('breadthBear').textContent = bear;
+  document.getElementById('breadthNeutral').textContent = neutral;
+  const moverEl = document.getElementById('breadthMover');
+  if (topMover.symbol) {
+    const sign = topMover.pct >= 0 ? '+' : '';
+    moverEl.textContent = `${topMover.symbol} ${sign}${topMover.pct.toFixed(2)}%`;
+    moverEl.style.color = topMover.pct > 0 ? 'var(--green)' : 'var(--red)';
+    // Top mover kartını vurgula
+    document.querySelectorAll('.coin-card').forEach(c => c.classList.remove('top-mover'));
+    const moverCard = document.querySelector(`.coin-card[data-symbol="${topMover.symbol}USDT"]`);
+    if (moverCard) moverCard.classList.add('top-mover');
+  }
+  const moodEl = document.getElementById('breadthMood');
+  if (bull > bear + neutral) {
+    moodEl.textContent = 'BOĞA HAKİM 📈';
+    moodEl.className = 'breadth-mood bullish';
+  } else if (bear > bull + neutral) {
+    moodEl.textContent = 'AYI HAKİM 📉';
+    moodEl.className = 'breadth-mood bearish';
+  } else {
+    moodEl.textContent = 'KARMA';
+    moodEl.className = 'breadth-mood mixed';
   }
 }
 
