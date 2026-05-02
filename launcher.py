@@ -1,11 +1,16 @@
-"""AurumPulse masaüstü uygulaması — Flask backend + PyWebView native pencere.
+"""AurumPulse masaüstü launcher — Flask backend + tarayıcıda otomatik aç.
 
 Çalıştırma:
-  python launcher.py        # geliştirme modunda
-  AurumPulse.exe            # PyInstaller ile build edildikten sonra
+  python launcher.py        # geliştirme/normal kullanım
+  pythonw launcher.py       # konsol penceresi olmadan
 
-İlk açılışta %APPDATA%/AurumPulse/ klasörü oluşturulur (Win) veya
-~/.aurumpulse/ (Mac/Linux). Veritabanı ve .env burada saklanır.
+İlk açılışta %APPDATA%/AurumPulse/ (Windows) veya ~/.aurumpulse/
+oluşturulur; veritabanı ve .env burada kalıcı.
+
+Tarayıcı (varsayılan: Chrome/Edge/Firefox) yeni sekmede açılır.
+Sekmeyi kapatınca arka plan çalışmaya devam eder. Tamamen durdurmak
+için açtığın konsol penceresini kapat (veya pythonw ile sessiz
+çalıştırdıysan: Görev Yöneticisi'nden 'pythonw.exe' sonlandır).
 """
 from __future__ import annotations
 import os
@@ -14,13 +19,12 @@ import socket
 import threading
 import time
 import shutil
+import webbrowser
 import urllib.request
 from pathlib import Path
 
 
-# ─── Path setup (BACKEND IMPORT ÖNCESİ olmalı) ───
 def _user_data_dir() -> Path:
-    """Platform-uygun kullanıcı veri klasörü."""
     if sys.platform == 'win32':
         base = Path(os.environ.get('APPDATA', Path.home() / 'AppData' / 'Roaming'))
     elif sys.platform == 'darwin':
@@ -33,26 +37,27 @@ def _user_data_dir() -> Path:
 
 
 def _bundle_dir() -> Path:
-    """PyInstaller içindeyken kaynak dosyaların bulunduğu klasör."""
     if getattr(sys, 'frozen', False):
         return Path(sys._MEIPASS)  # type: ignore[attr-defined]
     return Path(__file__).resolve().parent
 
 
-def _ensure_env_file(data_dir: Path) -> Path:
-    """İlk çalıştırmada .env dosyasını .env.example'dan kopyalar."""
+def _ensure_env_file(data_dir: Path) -> tuple[Path, bool]:
+    """İlk çalıştırmada .env'i .env.example'dan kopyalar.
+    Döner: (env_path, was_created_first_time)."""
     env_path = data_dir / '.env'
+    created = False
     if not env_path.exists():
         sample = _bundle_dir() / '.env.example'
         if sample.exists():
             shutil.copy(sample, env_path)
-            print(f"[launcher] İlk çalıştırma: .env oluşturuldu → {env_path}")
-            print(f"[launcher] Lütfen API anahtarlarını düzenleyin ve tekrar açın.")
-    return env_path
+            created = True
+            print(f"[launcher] İLK AÇILIŞ — .env oluşturuldu: {env_path}")
+            print(f"[launcher] Bu dosyayı editle, API anahtarlarını gir, sonra tekrar çalıştır.")
+    return env_path, created
 
 
 def _find_free_port() -> int:
-    """OS'tan boş bir port iste."""
     s = socket.socket()
     s.bind(('127.0.0.1', 0))
     port = s.getsockname()[1]
@@ -61,7 +66,6 @@ def _find_free_port() -> int:
 
 
 def _wait_for_server(port: int, timeout: float = 30.0) -> bool:
-    """Backend health endpoint'inin yanıt vermesini bekle."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -77,20 +81,26 @@ def main() -> int:
     data_dir = _user_data_dir()
     os.environ['AURUMPULSE_DATA_DIR'] = str(data_dir)
 
-    # PyInstaller bundle içinde HTML dosyalarını bulmak için
     if getattr(sys, 'frozen', False):
         os.chdir(_bundle_dir())
 
-    # .env hazırla
-    _ensure_env_file(data_dir)
+    env_path, first_run = _ensure_env_file(data_dir)
+    if first_run:
+        # İlk açılışta .env yeni oluşturuldu, key'ler boş — kullanıcı düzenlesin
+        try:
+            os.startfile(str(env_path))  # type: ignore[attr-defined]  (Windows-only)
+        except Exception:
+            pass
+        input("\n.env dosyasını düzenledikten sonra ENTER'a bas (veya pencereyi kapat)... ")
+        return 0
 
-    # 2) Boş port + backend'i thread'de başlat
+    # 2) Boş port + backend
     port = _find_free_port()
     os.environ['PORT'] = str(port)
 
-    # NOT: backend.py import edilirken thread'leri başlatıyor (top-level threading.Thread).
-    # Bu yüzden import sadece bir kere ve port set edildikten sonra olmalı.
-    print(f"[launcher] AurumPulse başlatılıyor — port={port}, data={data_dir}")
+    print(f"[launcher] AurumPulse başlatılıyor — port={port}")
+    print(f"[launcher] Veri klasörü: {data_dir}")
+
     import backend
 
     def _run_server():
@@ -112,41 +122,35 @@ def main() -> int:
 
     if not _wait_for_server(port):
         print("[launcher] HATA: Backend 30 saniyede başlamadı.")
+        input("ENTER'a bas çıkmak için... ")
         return 1
 
-    print(f"[launcher] Backend hazır → http://127.0.0.1:{port}/")
+    url = f'http://127.0.0.1:{port}/'
+    print(f"[launcher] ✅ Hazır → {url}")
+    print(f"[launcher] Tarayıcı açılıyor... (sekmeyi kapatsan bile arka plan çalışır)")
+    print(f"[launcher] Tamamen durdurmak için: bu pencereyi kapat (Ctrl+C)")
 
-    # 3) PyWebView ile native pencere
+    # 3) Tarayıcıda aç
     try:
-        import webview
-    except ImportError:
-        print("[launcher] HATA: pywebview yüklü değil. Çalıştır: pip install pywebview")
-        return 2
+        webbrowser.open(url, new=2)  # 2 = new tab
+    except Exception as e:
+        print(f"[launcher] Tarayıcı açılamadı, manuel ziyaret et: {url} ({e})")
 
-    window = webview.create_window(
-        'AurumPulse — XAU/USD Sinyal Terminali',
-        f'http://127.0.0.1:{port}/',
-        width=1600,
-        height=900,
-        min_size=(1024, 600),
-        confirm_close=False,
-    )
-
-    def _on_close():
-        print("[launcher] Pencere kapanıyor — backend durduruluyor...")
+    # 4) Konsol açık kalsın, kullanıcı kapatınca dur
+    try:
+        while True:
+            time.sleep(1)
+            if not server_thread.is_alive():
+                print("[launcher] Server thread öldü — çıkılıyor.")
+                return 1
+    except KeyboardInterrupt:
+        print("\n[launcher] Ctrl+C — kapatılıyor...")
         try:
             backend._shutdown_event.set()
         except Exception:
             pass
-
-    window.events.closed += _on_close
-
-    webview.start(debug=False)
-
-    # PyWebView dönüşü = pencere kapandı
-    backend._shutdown_event.set()
-    print("[launcher] Çıkıldı.")
-    return 0
+        time.sleep(1)
+        return 0
 
 
 if __name__ == '__main__':
